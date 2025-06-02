@@ -1,24 +1,39 @@
 import re
 from typing import List, Dict
 import frontmatter  # for parsing Jekyll markdown files
+from datetime import datetime
+from ..config import get_settings
+
+settings = get_settings()
 
 class TextProcessor:
-    def __init__(self, chunk_size: int = 500, chunk_overlap: int = 50):
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
+    def __init__(self, chunk_size: int = None, chunk_overlap: int = None):
+        self.chunk_size = chunk_size or int(settings.CHUNK_SIZE)
+        self.chunk_overlap = chunk_overlap or int(settings.CHUNK_OVERLAP)
 
-    def process_markdown(self, content: str) -> Dict:
-        """Process Jekyll markdown content"""
-        # Parse frontmatter and content
+    def _extract_metadata(self, content: str) -> Dict:
+        """Extract metadata from Jekyll frontmatter"""
         post = frontmatter.loads(content)
-        
-        return {
-            "metadata": dict(post.metadata),
-            "content": post.content
-        }
+        metadata = {}
+        for key, value in post.metadata.items():
+            if isinstance(value, datetime):
+                metadata[key] = value.isoformat()
+            elif isinstance(value, (list, dict)):
+                metadata[key] = str(value)
+            else:
+                metadata[key] = str(value)
+        return metadata
+
+    def _remove_frontmatter(self, content: str) -> str:
+        """Remove frontmatter from content"""
+        post = frontmatter.loads(content)
+        return post.content
 
     def chunk_text(self, text: str) -> List[str]:
         """Split text into overlapping chunks"""
+        if not text.strip():
+            return []
+
         # Clean text
         text = re.sub(r'\s+', ' ', text).strip()
         
@@ -32,17 +47,45 @@ class TextProcessor:
         for sentence in sentences:
             sentence_length = len(sentence)
             
-            if current_length + sentence_length > self.chunk_size:
-                # Store current chunk
+            # If a single sentence is longer than chunk_size, split it
+            if sentence_length > self.chunk_size:
                 if current_chunk:
                     chunks.append(' '.join(current_chunk))
+                    current_chunk = []
+                    current_length = 0
+                
+                # Split long sentence into smaller pieces
+                words = sentence.split()
+                current_piece = []
+                current_piece_length = 0
+                
+                for word in words:
+                    if current_piece_length + len(word) + 1 > self.chunk_size:
+                        chunks.append(' '.join(current_piece))
+                        current_piece = [word]
+                        current_piece_length = len(word)
+                    else:
+                        current_piece.append(word)
+                        current_piece_length += len(word) + 1
+                
+                if current_piece:
+                    current_chunk = current_piece
+                    current_length = current_piece_length
+            
+            # Normal case: add sentence to current chunk
+            elif current_length + sentence_length + 1 > self.chunk_size:
+                chunks.append(' '.join(current_chunk))
                 # Start new chunk with overlap
-                overlap_start = max(0, len(current_chunk) - self.chunk_overlap)
-                current_chunk = current_chunk[overlap_start:] + [sentence]
-                current_length = sum(len(s) for s in current_chunk)
+                if self.chunk_overlap > 0 and current_chunk:
+                    overlap_start = max(0, len(current_chunk) - self.chunk_overlap)
+                    current_chunk = current_chunk[overlap_start:] + [sentence]
+                    current_length = sum(len(s) + 1 for s in current_chunk) - 1
+                else:
+                    current_chunk = [sentence]
+                    current_length = sentence_length
             else:
                 current_chunk.append(sentence)
-                current_length += sentence_length
+                current_length += sentence_length + (1 if current_chunk else 0)
         
         # Add the last chunk
         if current_chunk:
@@ -52,18 +95,21 @@ class TextProcessor:
 
     def process_post(self, post: Dict) -> List[Dict]:
         """Process a blog post into chunks with metadata"""
-        processed_post = self.process_markdown(post["content"])
-        chunks = self.chunk_text(processed_post["content"])
+        if not post["content"].strip():
+            return []
+
+        metadata = self._extract_metadata(post["content"])
+        content = self._remove_frontmatter(post["content"])
+        chunks = self.chunk_text(content)
         
         # Create chunks with metadata
         return [{
             "id": f"{post['id']}_chunk_{i}",
-            "post_id": post["id"],
-            "chunk_index": i,
             "content": chunk,
             "metadata": {
-                **processed_post["metadata"],
+                **metadata,
                 "post_name": post["name"],
+                "url": post.get("url", ""),
                 "chunk_index": i,
                 "total_chunks": len(chunks)
             }
