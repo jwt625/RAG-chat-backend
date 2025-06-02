@@ -1,12 +1,13 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List
+from typing import List, Dict
 from ..rag.ingestion import ContentIngester
-from ..config import settings
+from ..config import get_settings
 import httpx
 
 router = APIRouter(prefix="/rag", tags=["rag"])
 ingester = ContentIngester()
+settings = get_settings()
 
 class SearchQuery(BaseModel):
     query: str
@@ -28,6 +29,12 @@ class GenerateQuery(BaseModel):
 class GenerateResponse(BaseModel):
     answer: str
     context_used: List[SearchResult]
+
+class ProgressResponse(BaseModel):
+    stage: str
+    current: int
+    total: int
+    message: str
 
 @router.post("/update")
 async def update_content(request: UpdateRequest = UpdateRequest()):
@@ -149,4 +156,9 @@ Answer (remember to cite sources):"""
             )
             
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) 
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/progress", response_model=ProgressResponse)
+async def get_progress():
+    """Get current progress of content update"""
+    return ingester.get_progress() 
