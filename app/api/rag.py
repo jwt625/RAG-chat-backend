@@ -127,7 +127,7 @@ Answer (remember to cite sources):"""
             
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                "https://api.deepseek.com/v1/completions",
+                "https://api.deepseek.com/chat/completions",
                 headers={
                     "Authorization": f"Bearer {settings.DEEPSEEK_API_KEY.get_secret_value()}",
                     "Content-Type": "application/json"
@@ -136,7 +136,7 @@ Answer (remember to cite sources):"""
                     "model": "deepseek-chat",
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.7,
-                    "max_tokens": 1000
+                    "max_tokens": 8000
                 },
                 timeout=30.0
             )
@@ -150,9 +150,14 @@ Answer (remember to cite sources):"""
             llm_response = response.json()
             generated_text = llm_response["choices"][0]["message"]["content"]
             
+            # Create response with limited context to prevent large responses
             return GenerateResponse(
                 answer=generated_text,
-                context_used=search_results
+                context_used=[{
+                    "content": result.content[:10000],  # Limit context size
+                    "metadata": result.metadata,
+                    "distance": result.distance
+                } for result in search_results]
             )
             
     except Exception as e:
