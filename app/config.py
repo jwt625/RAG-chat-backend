@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     # ChromaDB
     CHROMA_PERSIST_DIRECTORY: str = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data/chromadb")
 
+    # Text Processing
+    CHUNK_SIZE: int = 500
+    CHUNK_OVERLAP: int = 100
+
     # CORS
     CORS_ORIGINS: list[str] = ["https://jwt625.github.io"]
     

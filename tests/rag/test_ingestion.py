@@ -1,8 +1,17 @@
 import pytest
-from unittest.mock import Mock, patch
+import pytest_asyncio
+from unittest.mock import Mock, patch, PropertyMock
 import httpx
 import json
+import logging
 from app.rag.ingestion import ContentIngester
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Mock data for tests
 MOCK_FILES_RESPONSE = [
@@ -23,27 +32,25 @@ categories: test
 # Test Content
 This is a test blog post content."""
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def mock_httpx_client():
     with patch('httpx.AsyncClient') as mock_client:
-        # Mock the context manager
         mock_cm = Mock()
         mock_client.return_value.__aenter__.return_value = mock_cm
         
-        # Create async mock responses
-        files_response = Mock()
-        files_response.status_code = 200
-        files_response.json.return_value = MOCK_FILES_RESPONSE
-        
-        content_response = Mock()
-        content_response.status_code = 200
-        content_response.text = MOCK_FILE_CONTENT
-        
-        # Make get return a coroutine
+        # Create mock responses with proper async behavior
         async def mock_get(*args, **kwargs):
             if "_posts" in args[0]:
-                return files_response
-            return content_response
+                response = Mock()
+                response.status_code = 200
+                response.json.return_value = MOCK_FILES_RESPONSE
+                return response
+            else:
+                response = Mock()
+                response.status_code = 200
+                # Use property mock to ensure text attribute works correctly
+                type(response).text = PropertyMock(return_value=MOCK_FILE_CONTENT)
+                return response
             
         mock_cm.get = mock_get
         yield mock_client
@@ -53,7 +60,15 @@ def mock_chromadb():
     with patch('chromadb.PersistentClient') as mock_client:
         mock_collection = Mock()
         mock_client.return_value.get_or_create_collection.return_value = mock_collection
+        # Ensure upsert doesn't raise any exceptions
+        mock_collection.upsert.return_value = None
         yield mock_client
+
+@pytest.fixture
+def ingester():
+    """Create a ContentIngester instance"""
+    logger.info("Creating ContentIngester for test")
+    return ContentIngester()
 
 @pytest.mark.asyncio
 async def test_fetch_content_from_github(mock_httpx_client):
@@ -69,10 +84,10 @@ async def test_fetch_content_from_github(mock_httpx_client):
 async def test_fetch_content_from_github_api_error(mock_httpx_client):
     # Mock API error response
     async def mock_error_get(*args, **kwargs):
-        error_response = Mock()
-        error_response.status_code = 403
-        error_response.text = "API rate limit exceeded"
-        return error_response
+        response = Mock()
+        response.status_code = 403
+        response.text = "API rate limit exceeded"
+        return response
         
     mock_client = mock_httpx_client.return_value.__aenter__.return_value
     mock_client.get = mock_error_get
@@ -100,11 +115,16 @@ def test_process_and_store_content(mock_chromadb):
 
 @pytest.mark.asyncio
 async def test_update_content_success(mock_httpx_client, mock_chromadb):
+    # Set up mock collection to return success
+    mock_collection = mock_chromadb.return_value.get_or_create_collection.return_value
+    mock_collection.upsert.return_value = None  # Successful upsert returns None
+    
     ingester = ContentIngester()
     result = await ingester.update_content()
     
     assert result["status"] == "success"
     assert "Updated 1 posts" in result["message"]
+    assert mock_collection.upsert.called
 
 @pytest.mark.asyncio
 async def test_update_content_failure(mock_httpx_client):
@@ -119,4 +139,36 @@ async def test_update_content_failure(mock_httpx_client):
     result = await ingester.update_content()
     
     assert result["status"] == "error"
-    assert "Network error" in result["message"] 
+    assert "Network error" in result["message"]
+
+@pytest.mark.asyncio
+async def test_content_update(ingester):
+    """Test the full content update process"""
+    logger.info("Starting content update test")
+    
+    # Update content
+    result = await ingester.update_content()
+    assert result["status"] == "success", f"Update failed: {result['message']}"
+    
+    # Verify the result contains expected information
+    assert "posts" in result["message"], "Result should mention number of posts"
+    assert "chunks" in result["message"], "Result should mention number of chunks"
+    
+    logger.info(f"Update result: {result['message']}")
+    
+    # Verify content in ChromaDB
+    collection = ingester.collection
+    count = collection.count()
+    logger.info(f"ChromaDB collection has {count} documents")
+    assert count > 0, "ChromaDB should contain documents"
+    
+    # Get a sample document to verify structure
+    results = collection.get(limit=1)
+    assert len(results["documents"]) > 0, "Should be able to retrieve a document"
+    assert len(results["metadatas"]) > 0, "Document should have metadata"
+    
+    # Log sample document details
+    doc = results["documents"][0]
+    metadata = results["metadatas"][0]
+    logger.info(f"Sample document metadata: {metadata}")
+    logger.debug(f"Sample document content preview:\n{doc[:200]}...") 

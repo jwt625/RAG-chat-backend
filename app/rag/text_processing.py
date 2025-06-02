@@ -47,7 +47,7 @@ class TextProcessor:
         for sentence in sentences:
             sentence_length = len(sentence)
             
-            # If a single sentence is longer than chunk_size, split it
+            # If a single sentence is longer than chunk_size, split it by words
             if sentence_length > self.chunk_size:
                 if current_chunk:
                     chunks.append(' '.join(current_chunk))
@@ -60,35 +60,47 @@ class TextProcessor:
                 current_piece_length = 0
                 
                 for word in words:
-                    if current_piece_length + len(word) + 1 > self.chunk_size:
-                        chunks.append(' '.join(current_piece))
+                    word_length = len(word)
+                    if current_piece_length + word_length + (1 if current_piece else 0) > self.chunk_size:
+                        if current_piece:
+                            chunks.append(' '.join(current_piece))
                         current_piece = [word]
-                        current_piece_length = len(word)
+                        current_piece_length = word_length
                     else:
                         current_piece.append(word)
-                        current_piece_length += len(word) + 1
+                        current_piece_length += word_length + (1 if current_piece else 0)
                 
                 if current_piece:
                     current_chunk = current_piece
                     current_length = current_piece_length
             
             # Normal case: add sentence to current chunk
-            elif current_length + sentence_length + 1 > self.chunk_size:
-                chunks.append(' '.join(current_chunk))
+            elif current_length + sentence_length + (1 if current_chunk else 0) > self.chunk_size:
+                if current_chunk:
+                    chunks.append(' '.join(current_chunk))
+                
                 # Start new chunk with overlap
                 if self.chunk_overlap > 0 and current_chunk:
-                    overlap_start = max(0, len(current_chunk) - self.chunk_overlap)
-                    current_chunk = current_chunk[overlap_start:] + [sentence]
-                    current_length = sum(len(s) + 1 for s in current_chunk) - 1
+                    # Calculate overlap while respecting size limit
+                    overlap_words = []
+                    overlap_length = 0
+                    for word in reversed(current_chunk):
+                        if overlap_length + len(word) + 1 > self.chunk_overlap:
+                            break
+                        overlap_words.insert(0, word)
+                        overlap_length += len(word) + 1
+                    
+                    current_chunk = overlap_words + [sentence]
+                    current_length = sum(len(word) for word in current_chunk) + len(current_chunk) - 1
                 else:
                     current_chunk = [sentence]
                     current_length = sentence_length
             else:
                 current_chunk.append(sentence)
-                current_length += sentence_length + (1 if current_chunk else 0)
+                current_length += sentence_length + (1 if len(current_chunk) > 1 else 0)
         
-        # Add the last chunk
-        if current_chunk:
+        # Add the last chunk if it exists and isn't too long
+        if current_chunk and current_length <= self.chunk_size:
             chunks.append(' '.join(current_chunk))
         
         return chunks
