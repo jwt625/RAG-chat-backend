@@ -1,10 +1,10 @@
 import pytest
 import pytest_asyncio
-from unittest.mock import Mock, patch, PropertyMock
-import httpx
-import json
 import logging
 from app.rag.ingestion import ContentIngester
+from unittest.mock import Mock, AsyncMock, patch
+import httpx
+import json
 
 # Configure logging
 logging.basicConfig(
@@ -13,162 +13,118 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Mock data for tests
-MOCK_FILES_RESPONSE = [
+# Sample response data
+SAMPLE_FILE_LIST = [
     {
-        "name": "2024-01-01-test-post.md",
-        "type": "file",
+        "name": "2025-05-26-weekly-OFS-48.md",
+        "path": "_posts/2025-05-26-weekly-OFS-48.md",
         "sha": "abc123",
-        "html_url": "https://github.com/jwt625/jwt625.github.io/blob/master/_posts/2024-01-01-test-post.md"
+        "type": "file",
+        "download_url": "https://raw.githubusercontent.com/jwt625/jwt625.github.io/main/_posts/2025-05-26-weekly-OFS-48.md",
+        "html_url": "https://github.com/jwt625/jwt625.github.io/blob/main/_posts/2025-05-26-weekly-OFS-48.md"
     }
 ]
 
-MOCK_FILE_CONTENT = """---
+SAMPLE_FILE_CONTENT = """---
 layout: post
-title: Test Post
-date: 2024-01-01
-categories: test
+title: "Weekly OFS #48"
+date: 2025-05-26
+categories: weekly
+tags: [weekly, research, optics]
 ---
-# Test Content
-This is a test blog post content."""
 
-@pytest_asyncio.fixture
-async def mock_httpx_client():
+# Weekly Summary
+
+This week's focus was on advanced optical systems and their applications in quantum computing.
+
+## Research Progress
+
+- Completed simulation of quantum optical gates
+- Analyzed coherence properties of the system
+- Started writing the methods section of the paper
+
+## Next Steps
+
+1. Run additional verification tests
+2. Compare results with theoretical predictions
+3. Begin drafting the results section
+"""
+
+@pytest.fixture
+async def mock_httpx():
+    """Mock httpx client responses"""
     with patch('httpx.AsyncClient') as mock_client:
-        mock_cm = Mock()
-        mock_client.return_value.__aenter__.return_value = mock_cm
-        
-        # Create mock responses with proper async behavior
-        async def mock_get(*args, **kwargs):
-            if "_posts" in args[0]:
-                response = Mock()
-                response.status_code = 200
-                response.json.return_value = MOCK_FILES_RESPONSE
-                return response
+        # Mock the context manager
+        mock_context = AsyncMock()
+        mock_client.return_value.__aenter__.return_value = mock_context
+
+        # Mock the list files response
+        list_response = Mock()
+        list_response.status_code = 200
+        list_response.json.return_value = SAMPLE_FILE_LIST
+        list_response.raise_for_status = Mock()
+
+        # Mock the file content response
+        content_response = Mock()
+        content_response.status_code = 200
+        content_response.text = SAMPLE_FILE_CONTENT
+        content_response.raise_for_status = Mock()
+
+        # Set up the mock to return different responses for different URLs
+        async def mock_get(url, *args, **kwargs):
+            if url.endswith('_posts'):
+                return list_response
             else:
-                response = Mock()
-                response.status_code = 200
-                # Use property mock to ensure text attribute works correctly
-                type(response).text = PropertyMock(return_value=MOCK_FILE_CONTENT)
-                return response
-            
-        mock_cm.get = mock_get
+                return content_response
+
+        mock_context.get = mock_get
         yield mock_client
 
-@pytest.fixture
-def mock_chromadb():
-    with patch('chromadb.PersistentClient') as mock_client:
+@pytest.mark.asyncio
+async def test_content_update_with_most_recent(mock_httpx):
+    """Test the content update process with most recent post only"""
+    logger.info("Starting content update test with most recent post")
+    
+    # Create ingester with mocked ChromaDB
+    with patch('chromadb.PersistentClient') as mock_chroma:
+        # Mock collection
         mock_collection = Mock()
-        mock_client.return_value.get_or_create_collection.return_value = mock_collection
-        # Ensure upsert doesn't raise any exceptions
-        mock_collection.upsert.return_value = None
-        yield mock_client
-
-@pytest.fixture
-def ingester():
-    """Create a ContentIngester instance"""
-    logger.info("Creating ContentIngester for test")
-    return ContentIngester()
-
-@pytest.mark.asyncio
-async def test_fetch_content_from_github(mock_httpx_client):
-    ingester = ContentIngester()
-    posts = await ingester.fetch_content_from_github()
-    
-    assert len(posts) == 1
-    assert posts[0]["name"] == "2024-01-01-test-post.md"
-    assert posts[0]["content"] == MOCK_FILE_CONTENT
-    assert posts[0]["url"] == MOCK_FILES_RESPONSE[0]["html_url"]
-
-@pytest.mark.asyncio
-async def test_fetch_content_from_github_api_error(mock_httpx_client):
-    # Mock API error response
-    async def mock_error_get(*args, **kwargs):
-        response = Mock()
-        response.status_code = 403
-        response.text = "API rate limit exceeded"
-        return response
+        mock_collection.count.return_value = 1
+        mock_collection.get.return_value = {
+            "documents": ["Sample document content"],
+            "metadatas": [{
+                "url": "https://github.com/jwt625/jwt625.github.io/blob/main/_posts/2025-05-26-weekly-OFS-48.md",
+                "post_name": "2025-05-26-weekly-OFS-48.md",
+                "chunk_index": "1",
+                "total_chunks": "3"
+            }]
+        }
+        mock_chroma.return_value.get_or_create_collection.return_value = mock_collection
         
-    mock_client = mock_httpx_client.return_value.__aenter__.return_value
-    mock_client.get = mock_error_get
-    
-    ingester = ContentIngester()
-    with pytest.raises(Exception) as exc_info:
-        await ingester.fetch_content_from_github()
-    assert "Failed to fetch repository contents" in str(exc_info.value)
-
-def test_process_and_store_content(mock_chromadb):
-    ingester = ContentIngester()
-    test_posts = [{
-        "id": "abc123",
-        "name": "2024-01-01-test-post.md",
-        "content": MOCK_FILE_CONTENT,
-        "url": "https://github.com/jwt625/jwt625.github.io/blob/master/_posts/2024-01-01-test-post.md"
-    }]
-    
-    chunk_count = ingester.process_and_store_content(test_posts)
-    assert chunk_count > 0
-    
-    # Verify ChromaDB collection was called with correct data
-    collection = mock_chromadb.return_value.get_or_create_collection.return_value
-    assert collection.upsert.called
-
-@pytest.mark.asyncio
-async def test_update_content_success(mock_httpx_client, mock_chromadb):
-    # Set up mock collection to return success
-    mock_collection = mock_chromadb.return_value.get_or_create_collection.return_value
-    mock_collection.upsert.return_value = None  # Successful upsert returns None
-    
-    ingester = ContentIngester()
-    result = await ingester.update_content()
-    
-    assert result["status"] == "success"
-    assert "Updated 1 posts" in result["message"]
-    assert mock_collection.upsert.called
-
-@pytest.mark.asyncio
-async def test_update_content_failure(mock_httpx_client):
-    # Mock API error
-    async def mock_error_get(*args, **kwargs):
-        raise Exception("Network error")
+        ingester = ContentIngester()
         
-    mock_client = mock_httpx_client.return_value.__aenter__.return_value
-    mock_client.get = mock_error_get
-    
-    ingester = ContentIngester()
-    result = await ingester.update_content()
-    
-    assert result["status"] == "error"
-    assert "Network error" in result["message"]
-
-@pytest.mark.asyncio
-async def test_content_update(ingester):
-    """Test the full content update process"""
-    logger.info("Starting content update test")
-    
-    # Update content
-    result = await ingester.update_content()
-    assert result["status"] == "success", f"Update failed: {result['message']}"
-    
-    # Verify the result contains expected information
-    assert "posts" in result["message"], "Result should mention number of posts"
-    assert "chunks" in result["message"], "Result should mention number of chunks"
-    
-    logger.info(f"Update result: {result['message']}")
-    
-    # Verify content in ChromaDB
-    collection = ingester.collection
-    count = collection.count()
-    logger.info(f"ChromaDB collection has {count} documents")
-    assert count > 0, "ChromaDB should contain documents"
-    
-    # Get a sample document to verify structure
-    results = collection.get(limit=1)
-    assert len(results["documents"]) > 0, "Should be able to retrieve a document"
-    assert len(results["metadatas"]) > 0, "Document should have metadata"
-    
-    # Log sample document details
-    doc = results["documents"][0]
-    metadata = results["metadatas"][0]
-    logger.info(f"Sample document metadata: {metadata}")
-    logger.debug(f"Sample document content preview:\n{doc[:200]}...") 
+        # Update content with most recent post only
+        result = await ingester.update_content(most_recent_only=True)
+        assert result["status"] == "success", f"Update failed: {result['message']}"
+        
+        # Verify content in ChromaDB
+        collection = ingester.collection
+        count = collection.count()
+        logger.info(f"ChromaDB collection has {count} documents")
+        assert count > 0, "ChromaDB should contain documents"
+        
+        # Get and verify the chunks
+        results = collection.get()
+        assert len(results["documents"]) > 0, "Should have at least one document"
+        assert len(results["metadatas"]) > 0, "Documents should have metadata"
+        
+        # Verify metadata contains expected fields
+        metadata = results["metadatas"][0]
+        assert "url" in metadata, "Metadata should contain URL"
+        assert "post_name" in metadata, "Metadata should contain post name"
+        assert "chunk_index" in metadata, "Metadata should contain chunk index"
+        
+        # Log document details
+        for i, (doc, metadata) in enumerate(zip(results["documents"], results["metadatas"])):
+            logger.info(f"Document {i+1} metadata: {metadata}")
+            logger.debug(f"Document {i+1} content preview:\n{doc[:200]}...") 

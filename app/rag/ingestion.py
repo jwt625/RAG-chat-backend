@@ -6,6 +6,7 @@ from .text_processing import TextProcessor
 from ..config import get_settings
 import json
 import logging
+from datetime import datetime
 
 # Set up logging
 logging.basicConfig(
@@ -31,8 +32,8 @@ class ContentIngester:
         logger.info(f"Connected to ChromaDB collection: {self.collection.name}")
         self.text_processor = TextProcessor()
 
-    async def fetch_markdown_content(self, repo_owner: str = "jwt625", repo_name: str = "jwt625.github.io") -> List[Dict]:
-        """Fetch all markdown files from _posts directory"""
+    async def fetch_markdown_content(self, repo_owner: str = "jwt625", repo_name: str = "jwt625.github.io", most_recent_only: bool = False) -> List[Dict]:
+        """Fetch markdown files from _posts directory"""
         async with httpx.AsyncClient() as client:
             # Get list of markdown files
             api_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/contents/_posts"
@@ -46,6 +47,12 @@ class ContentIngester:
             
             files = [f for f in response.json() if f["type"] == "file" and f["name"].endswith(".md")]
             logger.info(f"Found {len(files)} markdown files")
+
+            if most_recent_only:
+                # Sort files by date in filename (YYYY-MM-DD-*)
+                files.sort(key=lambda x: x["name"].split("-")[:3], reverse=True)
+                files = files[:1]  # Keep only the most recent
+                logger.info(f"Selected most recent post: {files[0]['name']}")
             
             # Download content for each file
             posts = []
@@ -101,11 +108,11 @@ class ContentIngester:
         
         return len(all_chunks)
 
-    async def update_content(self) -> Dict:
+    async def update_content(self, most_recent_only: bool = False) -> Dict:
         """Update content in ChromaDB"""
         try:
             logger.info("Starting content update")
-            posts = await self.fetch_markdown_content()
+            posts = await self.fetch_markdown_content(most_recent_only=most_recent_only)
             chunk_count = self.process_and_store_content(posts)
             result = {
                 "status": "success", 
