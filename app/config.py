@@ -18,7 +18,10 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
 
     # DeepSeek API
-    DEEPSEEK_API_KEY: SecretStr | None = None  # made optional for initial testing
+    DEEPSEEK_API_KEY: SecretStr = Field(
+        ...,  # This makes it required
+        description="DeepSeek API key for LLM completions. Get it from https://platform.deepseek.com"
+    )
 
     # ChromaDB
     CHROMA_PERSIST_DIRECTORY: str = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data/chromadb")
