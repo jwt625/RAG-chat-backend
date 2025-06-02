@@ -24,6 +24,37 @@ Another section with different content.
     "url": "https://example.com/test-post"
 }
 
+# Real data from GitHub repo
+REAL_POST = {
+    "id": "abc123",
+    "name": "2025-05-26-weekly-OFS-48.md",
+    "content": """---
+layout: post
+title: "Weekly OFS #48"
+date: 2025-05-26
+categories: weekly
+tags: [weekly, research, optics]
+---
+
+# Weekly Summary
+
+This week's focus was on advanced optical systems and their applications in quantum computing.
+
+## Research Progress
+
+- Completed simulation of quantum optical gates
+- Analyzed coherence properties of the system
+- Started writing the methods section of the paper
+
+## Next Steps
+
+1. Run additional verification tests
+2. Compare results with theoretical predictions
+3. Begin drafting the results section
+""",
+    "url": "https://github.com/jwt625/jwt625.github.io/blob/main/_posts/2025-05-26-weekly-OFS-48.md"
+}
+
 def test_text_processor_initialization():
     processor = TextProcessor()
     assert processor is not None
@@ -109,4 +140,33 @@ def test_chunk_size_limits():
     for chunk in chunks:
         assert len(chunk["content"]) <= processor.chunk_size
         if chunk["metadata"]["chunk_index"] > 1:  # Not first chunk
-            assert len(chunk["content"]) >= processor.chunk_overlap 
+            assert len(chunk["content"]) >= processor.chunk_overlap
+
+def test_process_real_post():
+    """Test processing with real data from GitHub repo"""
+    processor = TextProcessor()
+    chunks = processor.process_post(REAL_POST)
+    
+    assert len(chunks) > 0, "Should generate at least one chunk"
+    
+    # Check first chunk
+    first_chunk = chunks[0]
+    assert "id" in first_chunk
+    assert "content" in first_chunk
+    assert "metadata" in first_chunk
+    
+    # Verify metadata
+    assert first_chunk["metadata"]["title"] == "Weekly OFS #48"
+    assert first_chunk["metadata"]["categories"] == "weekly"
+    assert first_chunk["metadata"]["tags"] == "weekly, research, optics"
+    
+    # Verify content
+    assert "Weekly Summary" in first_chunk["content"]
+    assert "quantum computing" in ' '.join(chunk["content"] for chunk in chunks)
+    
+    # Print chunk details for debugging
+    print("\nChunks generated from real post:")
+    for i, chunk in enumerate(chunks):
+        print(f"\nChunk {i+1}:")
+        print(f"Content length: {len(chunk['content'])}")
+        print(f"Content preview: {chunk['content'][:100]}...") 

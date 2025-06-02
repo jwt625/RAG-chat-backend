@@ -7,6 +7,7 @@ from ..config import get_settings
 import json
 import logging
 from datetime import datetime
+import re
 
 # Set up logging
 logging.basicConfig(
@@ -32,6 +33,11 @@ class ContentIngester:
         logger.info(f"Connected to ChromaDB collection: {self.collection.name}")
         self.text_processor = TextProcessor()
 
+    def _is_post_file(self, filename: str) -> bool:
+        """Check if a file is a blog post based on its name pattern (YYYY-MM-DD-*)"""
+        pattern = r'^\d{4}-\d{2}-\d{2}-.*\.md$'
+        return bool(re.match(pattern, filename))
+
     async def fetch_markdown_content(self, repo_owner: str = "jwt625", repo_name: str = "jwt625.github.io", most_recent_only: bool = False) -> List[Dict]:
         """Fetch markdown files from _posts directory"""
         async with httpx.AsyncClient() as client:
@@ -45,31 +51,36 @@ class ContentIngester:
             )
             response.raise_for_status()
             
-            files = [f for f in response.json() if f["type"] == "file" and f["name"].endswith(".md")]
-            logger.info(f"Found {len(files)} markdown files")
+            # Filter for post files only (YYYY-MM-DD-*.md)
+            files = [f for f in response.json() if f["type"] == "file" and self._is_post_file(f["name"])]
+            logger.info(f"Found {len(files)} blog posts")
+            logger.debug(f"Posts: {[f['name'] for f in files]}")
 
             if most_recent_only:
                 # Sort files by date in filename (YYYY-MM-DD-*)
                 files.sort(key=lambda x: x["name"].split("-")[:3], reverse=True)
                 files = files[:1]  # Keep only the most recent
                 logger.info(f"Selected most recent post: {files[0]['name']}")
+                logger.debug(f"Most recent post details: {files[0]}")
             
             # Download content for each file
             posts = []
             for file in files:
                 raw_url = file["download_url"]
-                logger.info(f"Downloading: {file['name']}")
+                logger.info(f"Downloading: {file['name']} from {raw_url}")
                 
                 content_response = await client.get(raw_url)
                 content_response.raise_for_status()
                 
-                posts.append({
+                post = {
                     "id": file["sha"],
                     "name": file["name"],
                     "content": content_response.text,
                     "url": file["html_url"]
-                })
-                logger.debug(f"Content preview for {file['name']}:\n{content_response.text[:200]}...")
+                }
+                logger.debug(f"Downloaded post: {post['name']}")
+                logger.debug(f"Content preview:\n{post['content'][:500]}...")
+                posts.append(post)
             
             return posts
 

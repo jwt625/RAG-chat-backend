@@ -15,10 +15,18 @@ class SearchResult(BaseModel):
     metadata: dict
     distance: float
 
+class UpdateRequest(BaseModel):
+    most_recent_only: bool = False
+
 @router.post("/update")
-async def update_content():
-    """Update blog content in ChromaDB"""
-    result = await ingester.update_content()
+async def update_content(request: UpdateRequest = UpdateRequest()):
+    """Update blog content in ChromaDB
+    
+    Args:
+        request: UpdateRequest with options:
+            - most_recent_only: If True, only fetch and process the most recent post
+    """
+    result = await ingester.update_content(most_recent_only=request.most_recent_only)
     if result["status"] == "error":
         raise HTTPException(status_code=500, detail=result["message"])
     return result

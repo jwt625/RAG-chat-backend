@@ -127,4 +127,20 @@ async def test_content_update_with_most_recent(mock_httpx):
         # Log document details
         for i, (doc, metadata) in enumerate(zip(results["documents"], results["metadatas"])):
             logger.info(f"Document {i+1} metadata: {metadata}")
-            logger.debug(f"Document {i+1} content preview:\n{doc[:200]}...") 
+            logger.debug(f"Document {i+1} content preview:\n{doc[:200]}...")
+
+def test_is_post_file():
+    """Test post file name pattern matching"""
+    ingester = ContentIngester()
+    
+    # Valid post filenames
+    assert ingester._is_post_file("2025-05-26-weekly-OFS-48.md")
+    assert ingester._is_post_file("2024-01-01-test-post.md")
+    assert ingester._is_post_file("2023-12-31-end-of-year.md")
+    
+    # Invalid filenames
+    assert not ingester._is_post_file("standard_header.md")
+    assert not ingester._is_post_file("2025-5-6-invalid-date.md")  # needs leading zeros
+    assert not ingester._is_post_file("2025-05-26-no-extension")
+    assert not ingester._is_post_file("not-a-date-post.md")
+    assert not ingester._is_post_file("README.md") 
