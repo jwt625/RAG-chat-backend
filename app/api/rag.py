@@ -1,9 +1,12 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List, Dict
+from typing import List, Dict, Optional
 from ..rag.ingestion import ContentIngester
 from ..config import get_settings
 import httpx
+from sqlalchemy.orm import Session
+from ..models import Chat, Message
+from ..utils import get_current_user
 
 router = APIRouter(prefix="/rag", tags=["rag"])
 ingester = ContentIngester()
@@ -25,6 +28,8 @@ class UpdateRequest(BaseModel):
 class GenerateQuery(BaseModel):
     query: str
     context_limit: int = 3  # Number of relevant chunks to use as context
+    chat_id: Optional[int] = None  # Chat session ID
+    message_history: Optional[List[Dict[str, str]]] = None  # Previous messages in the chat
 
 class GenerateResponse(BaseModel):
     answer: str
@@ -92,17 +97,44 @@ async def search_content(query: SearchQuery):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/generate", response_model=GenerateResponse)
-async def generate_response(query: GenerateQuery):
+@limiter.limit("20/minute")  # Rate limit
+async def generate_response(
+    query: GenerateQuery,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     """Generate a response using RAG with DeepSeek LLM"""
     try:
-        # 1. Get relevant context using search
+        # 1. Get or create chat session
+        chat = None
+        if query.chat_id:
+            chat = db.query(Chat).filter(
+                Chat.id == query.chat_id,
+                Chat.user_id == current_user["id"]
+            ).first()
+            if not chat:
+                raise HTTPException(status_code=404, detail="Chat session not found")
+        else:
+            chat = Chat(
+                user_id=current_user["id"],
+                title=query.query[:50] + "..."  # Use first 50 chars as title
+            )
+            db.add(chat)
+            db.commit()
+
+        # 2. Get relevant context using search
         search_results = await search_content(SearchQuery(query=query.query, limit=query.context_limit))
         
-        # 2. Format context and query for DeepSeek
+        # 3. Format context and query for DeepSeek
         context_text = "\n\n".join([
             f"Context {i+1} (Source: {result.metadata.get('title', 'Unknown')}, Date: {result.metadata.get('date', 'Unknown')}):\n{result.content}"
             for i, result in enumerate(search_results)
         ])
+        
+        # 4. Build conversation history
+        conversation_history = []
+        if query.message_history:
+            conversation_history.extend(query.message_history[-5:])  # Use last 5 messages
         
         prompt = f"""You are an AI research assistant helping users find and summarize information from a blog that covers various technical topics including quantum computing, machine learning, software development, and more.
 
@@ -113,6 +145,9 @@ Your task is to:
 4. Always cite your sources using the format [Title (Date)]
 5. If the context doesn't contain enough information to fully answer the question, acknowledge this and only discuss what's available in the provided context
 
+Previous conversation:
+{format_conversation_history(conversation_history)}
+
 Here is the relevant context from the blog:
 
 {context_text}
@@ -121,7 +156,7 @@ Question: {query.query}
 
 Answer (remember to cite sources):"""
 
-        # 3. Call DeepSeek API
+        # 5. Call DeepSeek API
         if not settings.DEEPSEEK_API_KEY:
             raise HTTPException(status_code=500, detail="DeepSeek API key not configured")
             
@@ -150,18 +185,50 @@ Answer (remember to cite sources):"""
             llm_response = response.json()
             generated_text = llm_response["choices"][0]["message"]["content"]
             
-            # Create response with limited context to prevent large responses
+            # 6. Save messages to database
+            user_message = Message(
+                chat_id=chat.id,
+                role="user",
+                content=query.query
+            )
+            assistant_message = Message(
+                chat_id=chat.id,
+                role="assistant",
+                content=generated_text,
+                context_used=[{
+                    "content": result.content[:10000],
+                    "metadata": result.metadata,
+                    "distance": result.distance
+                } for result in search_results]
+            )
+            db.add(user_message)
+            db.add(assistant_message)
+            db.commit()
+            
             return GenerateResponse(
                 answer=generated_text,
                 context_used=[{
-                    "content": result.content[:10000],  # Limit context size
+                    "content": result.content[:10000],
                     "metadata": result.metadata,
                     "distance": result.distance
                 } for result in search_results]
             )
             
     except Exception as e:
+        logging.error(f"Error in generate_response: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+def format_conversation_history(history: List[Dict[str, str]]) -> str:
+    if not history:
+        return "No previous conversation."
+    
+    formatted = []
+    for msg in history:
+        role = msg["role"].capitalize()
+        content = msg["content"]
+        formatted.append(f"{role}: {content}")
+    
+    return "\n\n".join(formatted)
 
 @router.get("/progress", response_model=ProgressResponse)
 async def get_progress():
