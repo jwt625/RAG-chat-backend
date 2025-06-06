@@ -1,12 +1,14 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 from ..rag.ingestion import ContentIngester
 from ..config import get_settings
+from ..database import get_db
+from ..security import limiter, get_current_user
+from ..models import Chat, Message, User
 import httpx
+import logging
 from sqlalchemy.orm import Session
-from ..models import Chat, Message
-from ..utils import get_current_user
 
 router = APIRouter(prefix="/rag", tags=["rag"])
 ingester = ContentIngester()
@@ -99,6 +101,7 @@ async def search_content(query: SearchQuery):
 @router.post("/generate", response_model=GenerateResponse)
 @limiter.limit("20/minute")  # Rate limit
 async def generate_response(
+    request: Request,
     query: GenerateQuery,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)

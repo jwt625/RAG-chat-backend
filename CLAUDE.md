@@ -18,6 +18,21 @@ cd /home/ubuntu/chatbot && source venv/bin/activate && uvicorn app.main:app --ho
 pytest
 ```
 
+**Update RAG database:**
+```bash
+curl -X POST http://localhost:8000/rag/update -H "Content-Type: application/json" -d '{"most_recent_only": true}'
+```
+
+**Query RAG database:**
+```bash
+curl -X POST http://localhost:8000/rag/search -H "Content-Type: application/json" -d '{"query": "What was discussed about quantum computing?", "limit": 3}'
+```
+
+**Generate RAG response:**
+```bash
+curl -X POST "http://localhost:8000/rag/generate" -H "Content-Type: application/json" -d '{"query": "What are the latest developments in quantum cryptography?", "context_limit": 3}'
+```
+
 **Code formatting and type checking:**
 ```bash
 black .
