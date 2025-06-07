@@ -16,7 +16,7 @@ limiter = Limiter(key_func=get_remote_address)
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 # OAuth2 for user authentication
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token", auto_error=False)
 
 async def verify_api_key(api_key: str = Security(api_key_header)):
     if not api_key:

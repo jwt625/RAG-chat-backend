@@ -104,7 +104,7 @@ async def generate_response(
     request: Request,
     query: GenerateQuery,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ):
     """Generate a response using RAG with DeepSeek LLM"""
     try:
@@ -124,6 +124,7 @@ async def generate_response(
             )
             db.add(chat)
             db.commit()
+            db.refresh(chat)
 
         # 2. Get relevant context using search
         search_results = await search_content(SearchQuery(query=query.query, limit=query.context_limit))
@@ -165,7 +166,7 @@ Answer (remember to cite sources):"""
             
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                "https://api.deepseek.com/chat/completions",
+                "https://api.deepseek.com/v1/chat/completions",
                 headers={
                     "Authorization": f"Bearer {settings.DEEPSEEK_API_KEY.get_secret_value()}",
                     "Content-Type": "application/json"
@@ -210,15 +211,81 @@ Answer (remember to cite sources):"""
             
             return GenerateResponse(
                 answer=generated_text,
-                context_used=[{
-                    "content": result.content[:10000],
-                    "metadata": result.metadata,
-                    "distance": result.distance
-                } for result in search_results]
+                context_used=search_results
             )
             
     except Exception as e:
         logging.error(f"Error in generate_response: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/generate-test", response_model=GenerateResponse)
+async def generate_response_test(
+    query: GenerateQuery
+):
+    """Generate a response using RAG with DeepSeek LLM (Test version without auth)"""
+    try:
+        # 1. Get relevant context using search
+        search_results = await search_content(SearchQuery(query=query.query, limit=query.context_limit))
+        
+        # 2. Format context and query for DeepSeek
+        context_text = "\n\n".join([
+            f"Context {i+1} (Source: {result.metadata.get('title', 'Unknown')}, Date: {result.metadata.get('date', 'Unknown')}):\n{result.content}"
+            for i, result in enumerate(search_results)
+        ])
+        
+        prompt = f"""You are an AI research assistant helping users find and summarize information from a blog that covers various technical topics including quantum computing, machine learning, software development, and more.
+
+Your task is to:
+1. Analyze the provided context from different blog posts
+2. Extract relevant information that answers the user's question
+3. Provide a clear, well-structured response
+4. Always cite your sources using the format [Title (Date)]
+5. If the context doesn't contain enough information to fully answer the question, acknowledge this and only discuss what's available in the provided context
+
+Here is the relevant context from the blog:
+
+{context_text}
+
+Question: {query.query}
+
+Answer (remember to cite sources):"""
+
+        # 3. Call DeepSeek API
+        if not settings.DEEPSEEK_API_KEY:
+            raise HTTPException(status_code=500, detail="DeepSeek API key not configured")
+            
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.DEEPSEEK_API_KEY.get_secret_value()}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "deepseek-chat",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.7,
+                    "max_tokens": 8000
+                },
+                timeout=30.0
+            )
+            
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"DeepSeek API error: {response.text}"
+                )
+                
+            llm_response = response.json()
+            generated_text = llm_response["choices"][0]["message"]["content"]
+            
+            return GenerateResponse(
+                answer=generated_text,
+                context_used=search_results
+            )
+            
+    except Exception as e:
+        logging.error(f"Error in generate_response_test: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 def format_conversation_history(history: List[Dict[str, str]]) -> str:
