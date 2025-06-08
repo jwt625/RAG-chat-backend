@@ -1,9 +1,14 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
-from typing import List, Dict
+from typing import List, Dict, Optional
 from ..rag.ingestion import ContentIngester
 from ..config import get_settings
+from ..database import get_db
+from ..security import limiter, get_current_user
+from ..models import Chat, Message, User
 import httpx
+import logging
+from sqlalchemy.orm import Session
 
 router = APIRouter(prefix="/rag", tags=["rag"])
 ingester = ContentIngester()
@@ -25,6 +30,8 @@ class UpdateRequest(BaseModel):
 class GenerateQuery(BaseModel):
     query: str
     context_limit: int = 3  # Number of relevant chunks to use as context
+    chat_id: Optional[int] = None  # Chat session ID
+    message_history: Optional[List[Dict[str, str]]] = None  # Previous messages in the chat
 
 class GenerateResponse(BaseModel):
     answer: str
@@ -37,7 +44,12 @@ class ProgressResponse(BaseModel):
     message: str
 
 @router.post("/update")
-async def update_content(request: UpdateRequest = UpdateRequest()):
+@limiter.limit("1/hour")  # Rate limit content updates
+async def update_content(
+    req: Request,
+    request: UpdateRequest = UpdateRequest(),
+    current_user: dict = Depends(get_current_user)
+):
     """Update blog content in ChromaDB
     
     Args:
@@ -54,7 +66,8 @@ async def update_content(request: UpdateRequest = UpdateRequest()):
     return result
 
 @router.get("/status")
-async def get_status():
+@limiter.limit("30/minute")  # Rate limit status checks
+async def get_status(request: Request):
     """Get RAG system status"""
     try:
         collection = ingester.collection
@@ -66,9 +79,8 @@ async def get_status():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/search", response_model=List[SearchResult])
-async def search_content(query: SearchQuery):
-    """Search blog content"""
+async def _internal_search(query: SearchQuery) -> List[SearchResult]:
+    """Internal search function without auth"""
     try:
         results = ingester.collection.query(
             query_texts=[query.query],
@@ -91,12 +103,151 @@ async def search_content(query: SearchQuery):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/search", response_model=List[SearchResult])
+@limiter.limit("20/minute")  # Rate limit searches
+async def search_content(
+    request: Request,
+    query: SearchQuery,
+    current_user: dict = Depends(get_current_user)
+):
+    """Search blog content"""
+    return await _internal_search(query)
+
 @router.post("/generate", response_model=GenerateResponse)
-async def generate_response(query: GenerateQuery):
+@limiter.limit("10/minute")  # Rate limit
+async def generate_response(
+    request: Request,
+    query: GenerateQuery,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
     """Generate a response using RAG with DeepSeek LLM"""
     try:
+        # 1. Get or create chat session
+        chat = None
+        if query.chat_id:
+            chat = db.query(Chat).filter(
+                Chat.id == query.chat_id,
+                Chat.user_id == current_user["id"]
+            ).first()
+            if not chat:
+                raise HTTPException(status_code=404, detail="Chat session not found")
+        else:
+            chat = Chat(
+                user_id=current_user["id"],
+                title=query.query[:50] + "..."  # Use first 50 chars as title
+            )
+            db.add(chat)
+            db.commit()
+            db.refresh(chat)
+
+        # 2. Get relevant context using search
+        search_results = await _internal_search(SearchQuery(query=query.query, limit=query.context_limit))
+        
+        # 3. Format context and query for DeepSeek
+        context_text = "\n\n".join([
+            f"Context {i+1} (Source: {result.metadata.get('title', 'Unknown')}, Date: {result.metadata.get('date', 'Unknown')}):\n{result.content}"
+            for i, result in enumerate(search_results)
+        ])
+        
+        # 4. Build conversation history
+        conversation_history = []
+        if query.message_history:
+            conversation_history.extend(query.message_history[-5:])  # Use last 5 messages
+        
+        prompt = f"""You are an AI research assistant helping users find and summarize information from a blog that covers various technical topics including quantum computing, machine learning, software development, and more.
+
+Your task is to:
+1. Analyze the provided context from different blog posts
+2. Extract relevant information that answers the user's question
+3. Provide a clear, well-structured response
+4. Always cite your sources using the format [Title (Date)]
+5. If the context doesn't contain enough information to fully answer the question, acknowledge this and only discuss what's available in the provided context
+
+Previous conversation:
+{format_conversation_history(conversation_history)}
+
+Here is the relevant context from the blog:
+
+{context_text}
+
+Question: {query.query}
+
+Answer (remember to cite sources):"""
+
+        # 5. Call DeepSeek API
+        if not settings.DEEPSEEK_API_KEY:
+            raise HTTPException(status_code=500, detail="DeepSeek API key not configured")
+            
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.DEEPSEEK_API_KEY.get_secret_value()}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "deepseek-chat",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.7,
+                    "max_tokens": 8000
+                },
+                timeout=30.0
+            )
+            
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"DeepSeek API error: {response.text}"
+                )
+                
+            llm_response = response.json()
+            generated_text = llm_response["choices"][0]["message"]["content"]
+            
+            # 6. Save messages to database
+            user_message = Message(
+                chat_id=chat.id,
+                role="user",
+                content=query.query
+            )
+            assistant_message = Message(
+                chat_id=chat.id,
+                role="assistant",
+                content=generated_text,
+                context_used=[{
+                    "content": result.content[:10000],
+                    "metadata": result.metadata,
+                    "distance": result.distance
+                } for result in search_results]
+            )
+            db.add(user_message)
+            db.add(assistant_message)
+            db.commit()
+            
+            return GenerateResponse(
+                answer=generated_text,
+                context_used=search_results
+            )
+            
+    except Exception as e:
+        logging.error(f"Error in generate_response: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/health")
+async def health_check():
+    """Public health check endpoint"""
+    return {"status": "healthy", "service": "RAG API"}
+
+@router.post("/generate-test", response_model=GenerateResponse)
+@limiter.limit("5/minute")  # Very restrictive rate limit for test endpoint
+async def generate_response_test(
+    request: Request,
+    query: GenerateQuery
+):
+    """Generate a response using RAG with DeepSeek LLM (Test version without auth)"""
+    try:
         # 1. Get relevant context using search
-        search_results = await search_content(SearchQuery(query=query.query, limit=query.context_limit))
+        search_results = await _internal_search(SearchQuery(query=query.query, limit=query.context_limit))
         
         # 2. Format context and query for DeepSeek
         context_text = "\n\n".join([
@@ -127,7 +278,7 @@ Answer (remember to cite sources):"""
             
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                "https://api.deepseek.com/chat/completions",
+                "https://api.deepseek.com/v1/chat/completions",
                 headers={
                     "Authorization": f"Bearer {settings.DEEPSEEK_API_KEY.get_secret_value()}",
                     "Content-Type": "application/json"
@@ -150,18 +301,26 @@ Answer (remember to cite sources):"""
             llm_response = response.json()
             generated_text = llm_response["choices"][0]["message"]["content"]
             
-            # Create response with limited context to prevent large responses
             return GenerateResponse(
                 answer=generated_text,
-                context_used=[{
-                    "content": result.content[:10000],  # Limit context size
-                    "metadata": result.metadata,
-                    "distance": result.distance
-                } for result in search_results]
+                context_used=search_results
             )
             
     except Exception as e:
+        logging.error(f"Error in generate_response_test: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+def format_conversation_history(history: List[Dict[str, str]]) -> str:
+    if not history:
+        return "No previous conversation."
+    
+    formatted = []
+    for msg in history:
+        role = msg["role"].capitalize()
+        content = msg["content"]
+        formatted.append(f"{role}: {content}")
+    
+    return "\n\n".join(formatted)
 
 @router.get("/progress", response_model=ProgressResponse)
 async def get_progress():

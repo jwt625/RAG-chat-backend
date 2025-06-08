@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from .config import get_settings
-from .api import rag
+from .api import rag, auth
 
 settings = get_settings()
 
@@ -26,6 +26,7 @@ app.add_middleware(
 app.state.max_response_size = 10 * 1024 * 1024  # 10MB max response size
 
 # Include routers
+app.include_router(auth.router)
 app.include_router(rag.router)
 
 @app.get("/")
