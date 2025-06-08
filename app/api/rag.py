@@ -44,7 +44,12 @@ class ProgressResponse(BaseModel):
     message: str
 
 @router.post("/update")
-async def update_content(request: UpdateRequest = UpdateRequest()):
+@limiter.limit("1/hour")  # Rate limit content updates
+async def update_content(
+    req: Request,
+    request: UpdateRequest = UpdateRequest(),
+    current_user: dict = Depends(get_current_user)
+):
     """Update blog content in ChromaDB
     
     Args:
@@ -61,7 +66,8 @@ async def update_content(request: UpdateRequest = UpdateRequest()):
     return result
 
 @router.get("/status")
-async def get_status():
+@limiter.limit("30/minute")  # Rate limit status checks
+async def get_status(request: Request):
     """Get RAG system status"""
     try:
         collection = ingester.collection
@@ -73,9 +79,8 @@ async def get_status():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/search", response_model=List[SearchResult])
-async def search_content(query: SearchQuery):
-    """Search blog content"""
+async def _internal_search(query: SearchQuery) -> List[SearchResult]:
+    """Internal search function without auth"""
     try:
         results = ingester.collection.query(
             query_texts=[query.query],
@@ -98,8 +103,18 @@ async def search_content(query: SearchQuery):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/search", response_model=List[SearchResult])
+@limiter.limit("20/minute")  # Rate limit searches
+async def search_content(
+    request: Request,
+    query: SearchQuery,
+    current_user: dict = Depends(get_current_user)
+):
+    """Search blog content"""
+    return await _internal_search(query)
+
 @router.post("/generate", response_model=GenerateResponse)
-@limiter.limit("20/minute")  # Rate limit
+@limiter.limit("10/minute")  # Rate limit
 async def generate_response(
     request: Request,
     query: GenerateQuery,
@@ -127,7 +142,7 @@ async def generate_response(
             db.refresh(chat)
 
         # 2. Get relevant context using search
-        search_results = await search_content(SearchQuery(query=query.query, limit=query.context_limit))
+        search_results = await _internal_search(SearchQuery(query=query.query, limit=query.context_limit))
         
         # 3. Format context and query for DeepSeek
         context_text = "\n\n".join([
@@ -218,14 +233,21 @@ Answer (remember to cite sources):"""
         logging.error(f"Error in generate_response: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/health")
+async def health_check():
+    """Public health check endpoint"""
+    return {"status": "healthy", "service": "RAG API"}
+
 @router.post("/generate-test", response_model=GenerateResponse)
+@limiter.limit("5/minute")  # Very restrictive rate limit for test endpoint
 async def generate_response_test(
+    request: Request,
     query: GenerateQuery
 ):
     """Generate a response using RAG with DeepSeek LLM (Test version without auth)"""
     try:
         # 1. Get relevant context using search
-        search_results = await search_content(SearchQuery(query=query.query, limit=query.context_limit))
+        search_results = await _internal_search(SearchQuery(query=query.query, limit=query.context_limit))
         
         # 2. Format context and query for DeepSeek
         context_text = "\n\n".join([

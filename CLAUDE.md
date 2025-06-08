@@ -13,29 +13,42 @@ This is a RAG (Retrieval Augmented Generation) chatbot backend built with FastAP
 cd /home/ubuntu/chatbot && source venv/bin/activate && uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
+**Authentication Flow:**
+```bash
+# Register user
+curl -X POST "http://localhost:8000/auth/register" -H "Content-Type: application/json" -d '{"username": "testuser", "email": "test@example.com", "password": "password123"}'
+
+# Login to get JWT token  
+curl -X POST "http://localhost:8000/auth/token" -H "Content-Type: application/x-www-form-urlencoded" -d "username=testuser&password=password123"
+
+# Set token for authenticated requests
+TOKEN="your_jwt_token_here"
+```
+
+**Protected RAG Operations (require JWT token):**
+```bash
+# Update RAG database (1/hour rate limit)
+curl -X POST http://localhost:8000/rag/update -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" -d '{"most_recent_only": true}'
+
+# Search content (20/minute rate limit)
+curl -X POST http://localhost:8000/rag/search -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" -d '{"query": "quantum computing", "limit": 3}'
+
+# Generate RAG response with chat history (10/minute rate limit)
+curl -X POST "http://localhost:8000/rag/generate" -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" -d '{"query": "What are recent developments in quantum cryptography?", "context_limit": 3}'
+```
+
+**Public/Test Endpoints:**
+```bash
+# Health check (no auth)
+curl http://localhost:8000/
+
+# Test RAG generation (5/minute rate limit, no auth)
+curl -X POST "http://localhost:8000/rag/generate-test" -H "Content-Type: application/json" -d '{"query": "What are the latest developments in quantum cryptography?", "context_limit": 3}'
+```
+
 **Run tests:**
 ```bash
 pytest
-```
-
-**Update RAG database:**
-```bash
-curl -X POST http://localhost:8000/rag/update -H "Content-Type: application/json" -d '{"most_recent_only": true}'
-```
-
-**Query RAG database:**
-```bash
-curl -X POST http://localhost:8000/rag/search -H "Content-Type: application/json" -d '{"query": "What was discussed about quantum computing?", "limit": 3}'
-```
-
-**Generate RAG response (requires authentication):**
-```bash
-curl -X POST "http://localhost:8000/rag/generate" -H "Content-Type: application/json" -d '{"query": "What are the latest developments in quantum cryptography?", "context_limit": 3}'
-```
-
-**Generate RAG response (test endpoint, no auth required):**
-```bash
-curl -X POST "http://localhost:8000/rag/generate-test" -H "Content-Type: application/json" -d '{"query": "What are the latest developments in quantum cryptography?", "context_limit": 3}'
 ```
 
 **Code formatting and type checking:**
@@ -101,11 +114,54 @@ Tests use PyTest with temporary ChromaDB instances (`/tmp/test_chroma`). The tes
 - Text processing and chunking
 - Database operations
 
-## Production Features
+## Recent Security & Production Updates
 
-The codebase includes production-ready features:
-- Sentry error monitoring integration
-- Rate limiting with SlowAPI
-- Rotating log files in `/logs/`
-- Resource monitoring utilities
-- GZip compression and trusted host middleware
+### **Authentication System** (Added December 2024)
+- **JWT-based authentication**: User registration, login, token management
+- **Database integration**: User accounts stored in PostgreSQL with bcrypt password hashing
+- **Protected endpoints**: All RAG operations now require valid JWT tokens
+- **Files added**: `app/api/auth.py` for authentication endpoints
+
+### **Rate Limiting** (Enhanced December 2024)  
+All endpoints now have rate limiting via SlowAPI:
+- Content updates: 1/hour (prevents abuse)
+- RAG generation: 10/minute 
+- Search queries: 20/minute
+- Status checks: 30/minute
+- Test endpoint: 5/minute (temporary for testing)
+
+### **Security Enhancements**
+- **CORS configuration**: Restricted to specific domains for production
+- **Network security**: OCI Security Lists configured for external access
+- **Firewall setup**: UFW enabled for port 8000
+- **Token validation**: OAuth2PasswordBearer scheme implemented
+
+### **External Access Configuration**
+- **OCI networking**: Security Lists, Route Tables, Internet Gateway configured
+- **Public IP access**: Server accessible at `http://<TBA>:8000`
+- **Health endpoints**: Public health check available at `/` and `/rag/health`
+
+### **Code Structure Changes**
+- **Authentication router**: Added to `app/main.py` 
+- **Internal functions**: `_internal_search()` to avoid auth conflicts
+- **Rate limiting decorators**: Added to all endpoints in `app/api/rag.py`
+- **Request parameters**: Added to support SlowAPI rate limiting
+
+### **Production Dependencies Added**
+```txt
+slowapi==0.1.9          # Rate limiting
+sentry-sdk==2.29.1       # Error monitoring  
+psutil==7.0.0           # System monitoring
+PyJWT==2.10.1           # JWT authentication
+email-validator==2.2.0  # Email validation
+```
+
+### **Database Schema**
+- **User table**: Authentication and user management
+- **Chat table**: Conversation sessions per user
+- **Message table**: Chat history with RAG context tracking
+
+## Current Status
+- ✅ **Fully functional**: External access, authentication, rate limiting
+- ✅ **Production ready**: Security, monitoring, error handling
+- 🔄 **Optional**: Sentry DSN, custom domain, HTTPS setup
