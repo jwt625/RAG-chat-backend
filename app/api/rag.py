@@ -46,20 +46,20 @@ class ProgressResponse(BaseModel):
 @router.post("/update")
 @limiter.limit("1/hour")  # Rate limit content updates
 async def update_content(
-    req: Request,
-    request: UpdateRequest = UpdateRequest(),
+    request: Request,
+    update_request: UpdateRequest = UpdateRequest(),
     current_user: dict = Depends(get_current_user)
 ):
     """Update blog content in ChromaDB
-    
+
     Args:
-        request: UpdateRequest with options:
+        update_request: UpdateRequest with options:
             - most_recent_only: If True, only fetch and process the most recent post
             - num_posts: If set, process this many most recent posts. Ignored if most_recent_only is True.
     """
     result = await ingester.update_content(
-        most_recent_only=request.most_recent_only,
-        num_posts=request.num_posts
+        most_recent_only=update_request.most_recent_only,
+        num_posts=update_request.num_posts
     )
     if result["status"] == "error":
         raise HTTPException(status_code=500, detail=result["message"])
