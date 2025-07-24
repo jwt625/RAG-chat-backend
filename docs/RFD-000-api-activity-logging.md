@@ -2,13 +2,21 @@
 
 **Request for Discussion (RFD) 000**  
 **Title**: Minimal API Activity Logging for Resource-Constrained Environment  
-**Status**: Draft  
+**Status**: Draft (Revised)  
 **Created**: 2025-07-21  
 **Author**: System Architecture Team  
 
 ## Summary
 
-This RFD proposes implementing a lightweight API activity logging system for the RAG chatbot backend that tracks user interactions, system performance, and security events while operating within the constraints of a free OCI instance with limited compute, memory, and storage.
+This RFD proposes implementing an ultra-lightweight API activity logging system for the RAG chatbot backend that tracks critical security events and errors while operating within severe memory constraints of a free OCI instance (956MB RAM with only 402MB available).
+
+## System Constraints
+
+**Actual Machine Specifications:**
+- **RAM**: 956MB total (402MB available, 1.4GB swap already in use)
+- **CPU**: 2 vCPUs (AMD EPYC 7551)
+- **Storage**: 33GB free (of 45GB total)
+- **Current Usage**: PostgreSQL (8.8MB), ChromaDB (213MB)
 
 ## Motivation
 
@@ -35,182 +43,169 @@ Rationale:
 
 ChromaDB is optimized for vector similarity search, not time-series log data.
 
-## Proposed Architecture
+## Revised Architecture (Memory-Optimized)
 
-### 1. Database Schema (PostgreSQL)
+### 1. Hybrid Logging Strategy
+
+Given severe memory constraints, we'll use a **hybrid approach**:
+- **PostgreSQL**: Only for critical security events (auth failures, errors)
+- **File-based**: For general API activity (rotating daily)
+- **In-memory**: Minimal metrics buffer (last hour only)
+
+### 2. Database Schema (PostgreSQL - Security Events Only)
 
 ```sql
--- Core activity log table (minimal design)
-CREATE TABLE api_activity_logs (
-    id SERIAL PRIMARY KEY,
-    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    user_id INTEGER REFERENCES users(id),
-    method VARCHAR(10),
-    endpoint VARCHAR(100),
-    status_code SMALLINT,
-    response_time_ms INTEGER,
-    ip_address INET,
-    user_agent VARCHAR(200),
-    error_message TEXT,
-    -- Indexes for performance
-    INDEX idx_timestamp (timestamp),
-    INDEX idx_user_id (user_id),
-    INDEX idx_endpoint (endpoint)
-);
-
--- Separate table for authentication events (security critical)
-CREATE TABLE auth_logs (
+-- Minimal auth events table (security critical only)
+CREATE TABLE auth_events (
     id SERIAL PRIMARY KEY,
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     username VARCHAR(50),
-    event_type VARCHAR(20), -- 'login_success', 'login_failure', 'register', 'token_refresh'
+    event_type VARCHAR(20), -- 'login_failure', 'register', 'suspicious_activity'
     ip_address INET,
-    user_agent VARCHAR(200),
-    failure_reason VARCHAR(100),
+    details VARCHAR(200), -- Truncated details
     INDEX idx_timestamp (timestamp),
-    INDEX idx_username (username)
+    INDEX idx_username_type (username, event_type)
 );
 
--- Aggregated metrics table (for dashboard/monitoring)
-CREATE TABLE api_metrics_hourly (
-    hour TIMESTAMP PRIMARY KEY,
-    endpoint VARCHAR(100),
-    total_requests INTEGER DEFAULT 0,
-    error_count INTEGER DEFAULT 0,
-    avg_response_time_ms INTEGER,
-    unique_users INTEGER DEFAULT 0,
-    INDEX idx_hour_endpoint (hour, endpoint)
+-- Daily aggregated metrics (compressed storage)
+CREATE TABLE metrics_daily (
+    date DATE PRIMARY KEY,
+    metrics JSONB -- Compressed JSON with endpoint stats
 );
 ```
 
-### 2. Storage Management Strategy
+### 3. File-Based Activity Logging
 
-To handle limited storage:
-- **Retention Policy**: 30 days for detailed logs, 90 days for aggregated metrics
-- **Log Rotation**: Daily cleanup job to delete old records
-- **Aggregation**: Hourly rollup of metrics to reduce storage
-- **Selective Logging**: Only log non-GET requests and errors for GET requests
-- **Size Limits**: Cap user_agent and error_message fields
+```python
+# Use Python's built-in logging with rotation
+# Logs to: /home/ubuntu/chatbot/logs/api/
+# Format: api-2024-07-21.log (max 10MB, keep 7 days)
+```
 
-### 3. Implementation Phases
+### 4. Memory-Conscious Storage Strategy
 
-## Phase 1: Core Infrastructure (Week 1)
+**Revised Retention Policy**:
+- **Database**: 7 days for auth events only
+- **File logs**: 7 days rolling (10MB max per file)
+- **Metrics**: Daily aggregation only (30 days)
+- **Memory buffer**: Last 1 hour only (evicted on rotation)
 
-**Goal**: Set up basic logging middleware and database tables
+**Selective Logging Rules**:
+- Auth failures: Always log to database
+- 5xx errors: Always log to database
+- 4xx errors: Sample 10% to files
+- Successful requests: Sample 1% to files only
+- Health checks: Never log
 
-**TODO List**:
-- [ ] Create Alembic migration for activity log tables
-- [ ] Implement FastAPI middleware for request/response logging
-- [ ] Create data models for log entries
-- [ ] Add database repository functions for log insertion
-- [ ] Implement async background task for log writing (non-blocking)
-- [ ] Add configuration settings for logging levels
-- [ ] Create unit tests for logging components
+### 5. Revised Implementation Phases
 
-**Deliverables**:
-- `alembic/versions/xxx_add_activity_logging.py`
-- `app/middleware/activity_logger.py`
-- `app/models/activity_log.py`
-- `app/repositories/activity_log_repo.py`
+## Phase 1: Security Event Logging (Week 1) - START HERE
 
-## Phase 2: Authentication Logging (Week 2)
-
-**Goal**: Track all authentication-related events
+**Goal**: Log only critical security events to minimize memory impact
 
 **TODO List**:
-- [ ] Modify auth endpoints to log login attempts
-- [ ] Log successful and failed authentication
-- [ ] Track user registration events
-- [ ] Add JWT token validation logging
-- [ ] Implement brute-force detection queries
-- [ ] Create auth event dashboard queries
-- [ ] Add tests for auth logging
+- [ ] Create minimal Alembic migration for auth_events table only
+- [ ] Update auth endpoints to log failures only
+- [ ] Implement memory-efficient batch writing (buffer 10 events max)
+- [ ] Add circuit breaker to disable logging if memory < 100MB
+- [ ] Configure Python file logger with rotation
+- [ ] Test memory impact with load testing
+- [ ] Add emergency kill switch environment variable
 
 **Deliverables**:
-- Updated `app/api/auth.py` with logging
-- `app/services/auth_monitor.py`
-- Auth monitoring SQL queries
+- `alembic/versions/xxx_add_auth_events.py`
+- `app/middleware/security_logger.py` (lightweight)
+- `app/utils/memory_monitor.py`
 
-## Phase 3: Performance Monitoring (Week 3)
+## Phase 2: File-Based Activity Logging (Week 2)
 
-**Goal**: Track API performance and resource usage
+**Goal**: Add lightweight file logging for non-critical events
 
 **TODO List**:
-- [ ] Add response time tracking to middleware
-- [ ] Implement endpoint performance aggregation
-- [ ] Create hourly metrics aggregation job
-- [ ] Add slow query detection and logging
-- [ ] Monitor ChromaDB query performance
-- [ ] Track DeepSeek API latency
-- [ ] Create performance dashboard queries
+- [ ] Set up rotating file handler (10MB max, 7 files)
+- [ ] Implement sampling logic (1% success, 10% client errors)
+- [ ] Create structured log format (JSON lines)
+- [ ] Add async file writing to prevent blocking
+- [ ] Test file I/O impact on performance
+- [ ] Create log parser script for analysis
 
 **Deliverables**:
-- `app/tasks/metrics_aggregator.py`
-- `app/monitoring/performance.py`
-- Performance monitoring queries
+- `app/logging/file_logger.py`
+- `scripts/parse_logs.py`
 
-## Phase 4: Storage Management (Week 4)
+## Phase 3: Minimal Metrics Buffer (Week 3)
 
-**Goal**: Implement log rotation and cleanup
+**Goal**: In-memory metrics with automatic eviction
 
 **TODO List**:
-- [ ] Create daily cleanup job for old logs
-- [ ] Implement log archival process (optional)
-- [ ] Add storage usage monitoring
-- [ ] Create alerts for high storage usage
-- [ ] Implement log compression (if needed)
-- [ ] Add configuration for retention policies
-- [ ] Test cleanup processes
+- [ ] Implement fixed-size circular buffer (1000 events max)
+- [ ] Create metrics aggregation in memory
+- [ ] Add automatic eviction when memory < 150MB
+- [ ] Implement metrics snapshot endpoint
+- [ ] Add memory usage to health check
+- [ ] Test memory footprint
 
 **Deliverables**:
-- `app/tasks/log_cleanup.py`
-- `app/config/retention_policy.py`
-- Cleanup job scheduling
+- `app/utils/metrics_buffer.py`
+- Updated health check endpoint
 
-## Phase 5: Observability Dashboard (Week 5)
+## Phase 4: Daily Aggregation (Week 4)
 
-**Goal**: Create simple monitoring endpoints
+**Goal**: Compress and store daily metrics
 
 **TODO List**:
-- [ ] Create `/admin/metrics` endpoint (protected)
-- [ ] Add endpoint for recent activity logs
-- [ ] Implement error rate monitoring endpoint
-- [ ] Create user activity summary endpoint
-- [ ] Add system health aggregation endpoint
-- [ ] Document all monitoring endpoints
-- [ ] Create simple CLI monitoring tool
+- [ ] Create daily aggregation job (runs at 2 AM)
+- [ ] Compress metrics to JSONB format
+- [ ] Implement file log parsing and summarization
+- [ ] Clean up old auth events (> 7 days)
+- [ ] Add storage monitoring alerts
+- [ ] Create backup script for metrics
 
 **Deliverables**:
-- `app/api/admin/monitoring.py`
-- `scripts/monitor_api.py`
-- Monitoring documentation
+- `app/tasks/daily_aggregation.py`
+- `scripts/backup_metrics.sh`
 
 ## Implementation Details
 
-### 1. Minimal Logging Middleware
+### 1. Ultra-Minimal Security Logger
 
 ```python
-# app/middleware/activity_logger.py
-from fastapi import Request
-import time
-import asyncio
-from app.repositories.activity_log_repo import create_activity_log
+# app/middleware/security_logger.py
+import psutil
+from collections import deque
+from app.config import LOGGING_ENABLED
 
-async def activity_logging_middleware(request: Request, call_next):
-    # Skip logging for health checks and static files
-    if request.url.path in ["/", "/health", "/docs"]:
+# Global in-memory buffer (max 10 events)
+SECURITY_BUFFER = deque(maxlen=10)
+
+async def security_logging_middleware(request: Request, call_next):
+    # Emergency kill switch
+    if not LOGGING_ENABLED:
         return await call_next(request)
     
-    start_time = time.time()
-    response = await call_next(request)
-    process_time = int((time.time() - start_time) * 1000)
+    # Check memory before logging
+    if psutil.virtual_memory().available < 100 * 1024 * 1024:  # 100MB
+        return await call_next(request)
     
-    # Log asynchronously to avoid blocking
-    asyncio.create_task(log_activity(
-        request, response.status_code, process_time
-    ))
+    response = await call_next(request)
+    
+    # Only log security-relevant events
+    if response.status_code == 401 or \
+       (request.url.path.startswith("/auth") and response.status_code >= 400):
+        SECURITY_BUFFER.append({
+            "timestamp": datetime.utcnow(),
+            "path": request.url.path[:50],  # Truncate
+            "status": response.status_code,
+            "ip": request.client.host
+        })
     
     return response
+
+# Batch write every 60 seconds
+async def flush_security_buffer():
+    if SECURITY_BUFFER and psutil.virtual_memory().available > 150 * 1024 * 1024:
+        # Write to DB and clear buffer
+        pass
 ```
 
 ### 2. Resource-Conscious Design
@@ -258,55 +253,59 @@ SELECT
 FROM api_activity_logs;
 ```
 
-## Resource Impact Analysis
+## Revised Resource Impact Analysis
 
-**Memory Impact**: 
-- ~50KB additional memory for middleware
-- Async logging prevents blocking
-- Reuses existing database connections
+**Memory Impact** (Critical Constraint): 
+- ~10KB for security event buffer (10 events max)
+- ~50KB for file logging buffer
+- Automatic disabling if available RAM < 100MB
+- No additional database connections (reuse existing pool)
 
-**Storage Impact** (estimated):
-- ~200 bytes per API request log
-- At 10,000 requests/day = 2MB/day
-- 30-day retention = 60MB for activity logs
-- Hourly aggregation reduces long-term storage
+**Storage Impact** (Manageable):
+- Database: ~100 bytes per security event × 100 events/day = 10KB/day
+- File logs: 10MB max × 7 files = 70MB total
+- Daily metrics: ~5KB per day × 30 days = 150KB
+- **Total**: < 100MB for all logging
 
-**CPU Impact**:
-- Minimal - async logging in background
-- Batch processing for aggregation
-- Indexed queries for fast retrieval
+**CPU Impact** (Minimal):
+- File I/O: Async with OS buffering
+- Database writes: Batched every 60 seconds
+- Sampling reduces processing by 99%
 
 ## Alternative Approaches Considered
 
-1. **File-based logging**: Rejected due to difficult querying and rotation
+1. **Full PostgreSQL logging**: Rejected due to memory overhead
 2. **External service (CloudWatch, etc.)**: Rejected due to cost
-3. **Redis**: Rejected due to memory constraints
-4. **SQLite**: Rejected due to concurrent write limitations
+3. **Redis**: Rejected due to severe memory constraints
+4. **SQLite**: Considered but rejected (still requires memory)
+5. **No logging**: Considered but rejected (security risk)
 
 ## Success Criteria
 
-1. All API requests are logged within 50ms overhead
-2. Storage usage stays under 100MB for logging
-3. Can query logs for security incidents within seconds
-4. System remains stable under load with logging enabled
-5. Easy to disable logging in case of resource issues
+1. Security events logged with < 10ms overhead
+2. Memory usage increase < 100KB
+3. Storage usage < 100MB total
+4. System remains stable when memory < 200MB available
+5. Zero impact on swap usage
+6. Automatic disabling when resources critical
 
-## Rollback Plan
+## Emergency Procedures
 
-If logging impacts performance:
-1. Disable middleware via environment variable
-2. Truncate log tables to free space
-3. Implement sampling (log only X% of requests)
-4. Move to file-based logging temporarily
+If system becomes unstable:
+1. **Immediate**: Set `LOGGING_ENABLED=false` (kills all logging)
+2. **Quick fix**: Reduce buffer size to 5 events
+3. **Storage full**: Delete file logs older than 1 day
+4. **Memory critical**: System auto-disables at 100MB
+5. **Database issues**: Fall back to file-only logging
 
-## Future Enhancements
+## Future Enhancements (When Resources Allow)
 
-- Export logs to external storage (S3)
-- Implement log sampling for high-traffic endpoints
-- Add distributed tracing support
-- Create Grafana dashboards
-- Implement anomaly detection
+- Upgrade to larger instance for full logging
+- External log aggregation service
+- Prometheus metrics (requires ~100MB RAM)
+- Full request/response logging
+- Real-time alerting
 
 ## Conclusion
 
-This minimal approach provides essential observability while respecting resource constraints. The phased implementation allows for gradual rollout with monitoring at each step to ensure system stability.
+This ultra-lightweight approach provides critical security logging while respecting severe memory constraints (956MB total, 402MB available). The hybrid strategy using minimal database logging for security events and sampled file logging for general activity ensures the system remains stable. The implementation prioritizes system stability over comprehensive logging, with automatic safeguards to prevent resource exhaustion.

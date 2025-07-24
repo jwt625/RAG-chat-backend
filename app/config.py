@@ -31,7 +31,12 @@ class Settings(BaseSettings):
     CHUNK_OVERLAP: int = 100
 
     # CORS
-    CORS_ORIGINS: list[str] = ["https://jwt625.github.io"]
+    CORS_ORIGINS: list[str] = [
+        "http://localhost:4000",
+        "http://127.0.0.1:4000",
+        "https://jwt625.github.io",
+        "https://outside5sigma.com"
+    ]
     
     class Config:
         env_file = ".env"
