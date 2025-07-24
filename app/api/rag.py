@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 from ..rag.ingestion import ContentIngester
@@ -301,9 +302,26 @@ Answer (remember to cite sources):"""
             llm_response = response.json()
             generated_text = llm_response["choices"][0]["message"]["content"]
             
-            return GenerateResponse(
+            # Return with explicit CORS headers for mobile compatibility
+            response_data = GenerateResponse(
                 answer=generated_text,
                 context_used=search_results
+            )
+            
+            # Get origin from request
+            origin = request.headers.get("origin", "*")
+            if origin in settings.CORS_ORIGINS or "*" in settings.CORS_ORIGINS:
+                allowed_origin = origin
+            else:
+                allowed_origin = settings.CORS_ORIGINS[0] if settings.CORS_ORIGINS else "*"
+            
+            return JSONResponse(
+                content=response_data.dict(),
+                headers={
+                    "Access-Control-Allow-Origin": allowed_origin,
+                    "Access-Control-Allow-Methods": "POST, OPTIONS",
+                    "Access-Control-Allow-Headers": "Content-Type, Accept",
+                }
             )
             
     except Exception as e:
