@@ -3,11 +3,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from .config import get_settings
 from .api import rag, auth
+from .middleware.comprehensive_logger import comprehensive_logger
 import logging
+import time
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Ensure logs directory exists
+os.makedirs('logs', exist_ok=True)
 
 settings = get_settings()
 
@@ -31,19 +37,28 @@ app.add_middleware(
 # Configure response settings
 app.state.max_response_size = 10 * 1024 * 1024  # 10MB max response size
 
-# Request logging middleware for debugging CORS
+# Comprehensive request logging middleware
 @app.middleware("http")
-async def log_requests(request: Request, call_next):
-    logger.info(f"Request: {request.method} {request.url}")
-    logger.info(f"Origin: {request.headers.get('origin', 'None')}")
-    
+async def comprehensive_logging_middleware(request: Request, call_next):
+    # Record start time
+    start_time = time.time()
+
     # Skip rate limiting for OPTIONS requests
     if request.method == "OPTIONS":
         request.state.view_rate_limit = None
-    
+
+    # Process request
     response = await call_next(request)
-    
-    logger.info(f"Response status: {response.status_code}")
+
+    # Calculate response time
+    response_time_ms = (time.time() - start_time) * 1000
+
+    # Log the request comprehensively
+    await comprehensive_logger.log_request(request, response, response_time_ms)
+
+    # Keep basic console logging for debugging
+    logger.info(f"Request: {request.method} {request.url.path} - {response.status_code} - {response_time_ms:.2f}ms")
+
     return response
 
 # Explicit OPTIONS handler for mobile browser preflight requests

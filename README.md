@@ -9,6 +9,7 @@ A FastAPI-based backend service for implementing RAG (Retrieval Augmented Genera
 - **ChromaDB Vector Storage**: Semantic search with embeddings
 - **PostgreSQL**: User authentication and conversation history
 - **DeepSeek LLM Integration**: OpenAI-compatible API for response generation
+- **Comprehensive API Logging**: Complete request/response logging with enhanced RAG endpoint tracking
 - **Production Ready**: Security middleware, rate limiting, monitoring
 
 ## Project Structure
@@ -18,10 +19,14 @@ A FastAPI-based backend service for implementing RAG (Retrieval Augmented Genera
 ├── app/
 │   ├── api/          # API endpoints
 │   ├── rag/          # RAG implementation
+│   ├── middleware/   # Logging and security middleware
 │   └── utils/        # Utility functions
 ├── data/
 │   └── chromadb/     # Vector database storage
 ├── alembic/          # Database migrations
+├── docs/             # RFD documentation
+├── logs/             # Application logs
+├── scripts/          # Utility scripts
 └── tests/            # Test cases
 ```
 
@@ -51,7 +56,13 @@ sudo -u postgres psql -c "ALTER USER chatbot PASSWORD 'dev_password_123';"
 sudo -u postgres createdb -O chatbot chatbot_db
 ```
 
-5. Start the server:
+5. Run database migrations:
+```bash
+source venv/bin/activate
+alembic upgrade head
+```
+
+6. Start the server:
 ```bash
 source venv/bin/activate
 uvicorn app.main:app --host 0.0.0.0 --port 8000
@@ -100,7 +111,28 @@ DEEPSEEK_API_KEY=your_deepseek_api_key
 
 # CORS
 CORS_ORIGINS=["https://jwt625.github.io"]
+
+# Logging (optional)
+LOGGING_ENABLED=true
+LOG_RETENTION_DAYS=30
 ```
+
+## Database Schema
+
+The application uses PostgreSQL with the following main tables:
+
+**Core Tables**:
+- `users` - User accounts and authentication
+- `chats` - Chat sessions for conversation history
+- `messages` - Individual messages in chat sessions
+
+**Logging Tables**:
+- `api_request_logs` - Comprehensive API request logging
+  - All request/response metadata
+  - Enhanced RAG endpoint data (queries, context, responses)
+  - Performance metrics and error tracking
+- `daily_metrics` - Aggregated daily statistics
+- `alembic_version` - Database migration tracking
 
 ## API Usage Examples
 
@@ -181,9 +213,61 @@ curl -X POST "http://<insert.host.ip.address>:8000/rag/generate-test" \
 
 ## Test Scripts
 
+**RAG & API Testing**:
 - `scripts/test_rag_demo.py`: Interactive demo of the complete RAG workflow
+- `scripts/test_logging.py`: Test comprehensive API logging functionality
 - `tests/test_deepseek_api.py`: DeepSeek API integration tests
 - `tests/test_full_rag_workflow.py`: Comprehensive RAG workflow tests
+
+**Monitoring & Analysis**:
+- `scripts/check_logs.py`: Analyze API request logs and generate reports
+- `scripts/sql_queries.sql`: Collection of useful SQL queries for log analysis
+
+## Documentation
+
+**Request for Discussion (RFD) Documents**:
+- `docs/RFD-000-api-activity-logging.md`: Original lightweight logging proposal
+- `docs/RFD-001-HTTPS-certificate.md`: HTTPS certificate implementation
+- `docs/RFD-002-mobile-cors-fix.md`: Mobile CORS compatibility fixes
+- `docs/RFD-003-comprehensive-api-logging.md`: ✅ Comprehensive logging implementation
+
+## API Logging & Monitoring
+
+✅ **Comprehensive Request Logging**:
+- Every API request logged to PostgreSQL database
+- Enhanced logging for RAG generate endpoints
+- Request/response timing and size tracking
+- User activity and IP address logging
+- Error tracking and analysis
+
+✅ **RAG Endpoint Analytics**:
+- Full query text capture
+- Context chunks analysis (count, sources, distances)
+- Response length and quality metrics
+- Chat session correlation
+- Performance monitoring
+
+✅ **Monitoring Tools**:
+- `scripts/check_logs.py` - Python log analysis tool
+- `scripts/sql_queries.sql` - SQL queries for manual inspection
+- `scripts/test_logging.py` - Logging functionality tests
+
+### Check API Logs
+
+**Python Analysis Tool**:
+```bash
+source venv/bin/activate
+python scripts/check_logs.py
+```
+
+**SQL Database Queries**:
+```bash
+# Recent requests
+sudo -u postgres psql -d chatbot_db -c "SELECT timestamp, method, path, status_code FROM api_request_logs ORDER BY timestamp DESC LIMIT 10;"
+
+# Generate endpoint stats
+sudo -u postgres psql -d chatbot_db -c "SELECT COUNT(*), AVG(response_time_ms) FROM api_request_logs WHERE event_type = 'rag_generate';"
+```
 
 ## Security Features
 
@@ -195,7 +279,7 @@ curl -X POST "http://<insert.host.ip.address>:8000/rag/generate-test" \
 
 ✅ **Rate Limiting** (requests per user per timeframe):
 - Content updates: 1/hour
-- RAG generation: 10/minute  
+- RAG generation: 10/minute
 - Search queries: 20/minute
 - Status checks: 30/minute
 - Test endpoint: 5/minute (temporary)

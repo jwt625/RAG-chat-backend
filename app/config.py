@@ -37,6 +37,10 @@ class Settings(BaseSettings):
         "https://jwt625.github.io",
         "https://outside5sigma.com"
     ]
+
+    # Logging
+    LOGGING_ENABLED: bool = True
+    LOG_RETENTION_DAYS: int = 30
     
     class Config:
         env_file = ".env"

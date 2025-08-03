@@ -7,8 +7,10 @@ from ..config import get_settings
 from ..database import get_db
 from ..security import limiter, get_current_user
 from ..models import Chat, Message, User
+from ..middleware.comprehensive_logger import log_rag_request
 import httpx
 import logging
+import time
 from sqlalchemy.orm import Session
 
 router = APIRouter(prefix="/rag", tags=["rag"])
@@ -123,7 +125,14 @@ async def generate_response(
     current_user: dict = Depends(get_current_user)
 ):
     """Generate a response using RAG with DeepSeek LLM"""
+    start_time = time.time()
+    search_results = []
+    generated_text = ""
+    chat_id = None
+
     try:
+        # Store user ID in request state for logging
+        request.state.user_id = current_user["id"]
         # 1. Get or create chat session
         chat = None
         if query.chat_id:
@@ -224,11 +233,30 @@ Answer (remember to cite sources):"""
             db.add(user_message)
             db.add(assistant_message)
             db.commit()
-            
-            return GenerateResponse(
+
+            # Enhanced logging for generate endpoint
+            response_time_ms = (time.time() - start_time) * 1000
+            response = GenerateResponse(
                 answer=generated_text,
                 context_used=search_results
             )
+
+            # Log the RAG request with detailed information
+            await log_rag_request(
+                request=request,
+                response=JSONResponse(content=response.dict()),
+                response_time_ms=response_time_ms,
+                query_data=query.dict(),
+                context_used=[{
+                    "content": result.content,
+                    "metadata": result.metadata,
+                    "distance": result.distance
+                } for result in search_results],
+                response_text=generated_text,
+                chat_id=chat.id
+            )
+
+            return response
             
     except Exception as e:
         logging.error(f"Error in generate_response: {str(e)}")
@@ -246,6 +274,10 @@ async def generate_response_test(
     query: GenerateQuery
 ):
     """Generate a response using RAG with DeepSeek LLM (Test version without auth)"""
+    start_time = time.time()
+    search_results = []
+    generated_text = ""
+
     try:
         # 1. Get relevant context using search
         search_results = await _internal_search(SearchQuery(query=query.query, limit=query.context_limit))
@@ -302,20 +334,23 @@ Answer (remember to cite sources):"""
             llm_response = response.json()
             generated_text = llm_response["choices"][0]["message"]["content"]
             
+            # Enhanced logging for generate-test endpoint
+            response_time_ms = (time.time() - start_time) * 1000
+
             # Return with explicit CORS headers for mobile compatibility
             response_data = GenerateResponse(
                 answer=generated_text,
                 context_used=search_results
             )
-            
+
             # Get origin from request
             origin = request.headers.get("origin", "*")
             if origin in settings.CORS_ORIGINS or "*" in settings.CORS_ORIGINS:
                 allowed_origin = origin
             else:
                 allowed_origin = settings.CORS_ORIGINS[0] if settings.CORS_ORIGINS else "*"
-            
-            return JSONResponse(
+
+            json_response = JSONResponse(
                 content=response_data.dict(),
                 headers={
                     "Access-Control-Allow-Origin": allowed_origin,
@@ -323,6 +358,23 @@ Answer (remember to cite sources):"""
                     "Access-Control-Allow-Headers": "Content-Type, Accept",
                 }
             )
+
+            # Log the RAG request with detailed information (no chat_id for test endpoint)
+            await log_rag_request(
+                request=request,
+                response=json_response,
+                response_time_ms=response_time_ms,
+                query_data=query.dict(),
+                context_used=[{
+                    "content": result.content,
+                    "metadata": result.metadata,
+                    "distance": result.distance
+                } for result in search_results],
+                response_text=generated_text,
+                chat_id=None  # No chat session for test endpoint
+            )
+
+            return json_response
             
     except Exception as e:
         logging.error(f"Error in generate_response_test: {str(e)}")
