@@ -389,6 +389,7 @@ async def cleanup_old_logs():
    - Memory monitoring with automatic disable at low memory
    - Async database writes with file fallback
    - Enhanced logging for generate endpoints
+   - **ROBUST ERROR HANDLING** - Never interrupts normal API workflow
 
 3. **Enhanced Generate Endpoint Logging**:
    - Full RAG query text capture
@@ -396,6 +397,7 @@ async def cleanup_old_logs():
    - Response length tracking
    - Chat session correlation
    - Performance metrics
+   - DeepSeek API response debugging
 
 4. **Database Migration**:
    - Alembic migration created and applied
@@ -405,6 +407,13 @@ async def cleanup_old_logs():
    - `scripts/check_logs.py` - Python script for log analysis
    - `scripts/sql_queries.sql` - SQL queries for manual inspection
    - `scripts/test_logging.py` - Test script to verify logging
+
+6. **Production-Grade Error Handling**:
+   - **Multi-level fallbacks**: Database → File → Silent continuation
+   - **Safe type conversion** with defaults for all fields
+   - **Memory protection** with automatic disable at low memory
+   - **Connection safety** with proper cleanup in finally blocks
+   - **Graceful degradation** - logging failures never break requests
 
 ### 📊 Usage Instructions
 
@@ -476,13 +485,32 @@ ORDER BY count DESC;
 - **Minimal overhead** - <2ms per request, async processing
 - **Production ready** - File fallback, error handling, memory monitoring
 
-### 🔧 Maintenance
+### 🔧 Maintenance & Error Handling
 
-**Automatic Features**:
+**Automatic Safety Features**:
 - Memory monitoring with auto-disable at <50MB free RAM
 - Async database writes prevent request blocking
 - File logging fallback if database unavailable
 - In-memory buffer for recent requests (last 100)
+
+**Robust Error Handling Architecture**:
+```
+Request → Middleware (try/catch) → Logger (try/catch) → Database (try/catch) → File Fallback (try/catch) → Silent Continue
+```
+
+**Error Handling Levels**:
+1. **Middleware Level**: Comprehensive try/catch around entire logging process
+2. **Logger Level**: Safe field extraction with defaults for missing/invalid data
+3. **Database Level**: Field validation, type conversion, connection cleanup
+4. **File Level**: Fallback logging with JSON serialization safety
+5. **Silent Level**: Ultimate fallback - continue without logging if everything fails
+
+**Key Safety Principles**:
+- **NEVER interrupt normal API workflow** - logging is fire-and-forget
+- **Safe defaults** for all fields (empty strings, zeros, nulls)
+- **Type validation** and conversion before database insertion
+- **Connection cleanup** in finally blocks
+- **Memory checks** before any logging operation
 
 **Manual Cleanup** (optional):
 ```sql
@@ -491,4 +519,38 @@ DELETE FROM api_request_logs
 WHERE timestamp < NOW() - INTERVAL '30 days';
 ```
 
-This implementation provides complete API activity logging while respecting system constraints and focusing on the critical generate endpoints as requested.
+### 🛡️ Production Reliability
+
+**Error Handling Examples**:
+```python
+# Main middleware - never fails
+try:
+    await comprehensive_logger.log_request(request, response, response_time_ms)
+except:
+    pass  # Logging must never break the request
+
+# Database operations - safe with fallbacks
+try:
+    db_log = ApiRequestLog(**safe_log_entry)
+    db.add(db_log)
+    db.commit()
+except SQLAlchemyError:
+    await self._write_to_file(log_entry, db_error=str(e))
+except Exception:
+    pass  # Silent fallback
+finally:
+    if db:
+        db.close()  # Always cleanup
+```
+
+**Memory Protection**:
+```python
+def is_memory_available(self) -> bool:
+    try:
+        available_mb = psutil.virtual_memory().available / (1024 * 1024)
+        return available_mb > self.min_memory_mb
+    except:
+        return True  # If can't check, assume available
+```
+
+This implementation provides **bulletproof API activity logging** that never interrupts normal operations while delivering complete visibility into system usage, especially the critical generate endpoints.

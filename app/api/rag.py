@@ -206,13 +206,25 @@ Answer (remember to cite sources):"""
             )
             
             if response.status_code != 200:
+                logging.error(f"DeepSeek API error - Status: {response.status_code}, Response: {response.text}")
                 raise HTTPException(
                     status_code=500,
                     detail=f"DeepSeek API error: {response.text}"
                 )
-                
+
             llm_response = response.json()
-            generated_text = llm_response["choices"][0]["message"]["content"]
+            logging.info(f"DeepSeek API response structure: {list(llm_response.keys())}")
+
+            # Safely extract generated text
+            try:
+                generated_text = llm_response["choices"][0]["message"]["content"]
+                logging.info(f"Generated text length: {len(generated_text)}")
+            except (KeyError, IndexError, TypeError) as e:
+                logging.error(f"Error extracting DeepSeek response: {e}, Full response: {llm_response}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Invalid DeepSeek API response format: {str(e)}"
+                )
             
             # 6. Save messages to database
             user_message = Message(
@@ -326,13 +338,25 @@ Answer (remember to cite sources):"""
             )
             
             if response.status_code != 200:
+                logging.error(f"DeepSeek API error (test endpoint) - Status: {response.status_code}, Response: {response.text}")
                 raise HTTPException(
                     status_code=500,
                     detail=f"DeepSeek API error: {response.text}"
                 )
-                
+
             llm_response = response.json()
-            generated_text = llm_response["choices"][0]["message"]["content"]
+            logging.info(f"DeepSeek API response structure (test): {list(llm_response.keys())}")
+
+            # Safely extract generated text
+            try:
+                generated_text = llm_response["choices"][0]["message"]["content"]
+                logging.info(f"Generated text length (test): {len(generated_text)}")
+            except (KeyError, IndexError, TypeError) as e:
+                logging.error(f"Error extracting DeepSeek response (test): {e}, Full response: {llm_response}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Invalid DeepSeek API response format: {str(e)}"
+                )
             
             # Enhanced logging for generate-test endpoint
             response_time_ms = (time.time() - start_time) * 1000

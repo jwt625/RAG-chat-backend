@@ -37,29 +37,57 @@ app.add_middleware(
 # Configure response settings
 app.state.max_response_size = 10 * 1024 * 1024  # 10MB max response size
 
-# Comprehensive request logging middleware
+# Comprehensive request logging middleware - NEVER interrupts requests
 @app.middleware("http")
 async def comprehensive_logging_middleware(request: Request, call_next):
-    # Record start time
     start_time = time.time()
+    response = None
 
-    # Skip rate limiting for OPTIONS requests
-    if request.method == "OPTIONS":
-        request.state.view_rate_limit = None
+    try:
+        # Skip rate limiting for OPTIONS requests
+        if hasattr(request, 'method') and request.method == "OPTIONS":
+            try:
+                request.state.view_rate_limit = None
+            except:
+                pass
 
-    # Process request
-    response = await call_next(request)
+        # Process request
+        response = await call_next(request)
 
-    # Calculate response time
-    response_time_ms = (time.time() - start_time) * 1000
+        # Calculate response time safely
+        try:
+            response_time_ms = (time.time() - start_time) * 1000
+        except:
+            response_time_ms = 0.0
 
-    # Log the request comprehensively
-    await comprehensive_logger.log_request(request, response, response_time_ms)
+        # Log the request comprehensively (fire and forget - never blocks)
+        try:
+            await comprehensive_logger.log_request(request, response, response_time_ms)
+        except:
+            pass  # Logging must never break the request
 
-    # Keep basic console logging for debugging
-    logger.info(f"Request: {request.method} {request.url.path} - {response.status_code} - {response_time_ms:.2f}ms")
+        # Keep basic console logging for debugging (safe)
+        try:
+            path = getattr(request.url, 'path', '/unknown') if hasattr(request, 'url') else '/unknown'
+            method = getattr(request, 'method', 'UNKNOWN') if hasattr(request, 'method') else 'UNKNOWN'
+            status = getattr(response, 'status_code', 500) if response else 500
+            logger.info(f"Request: {method} {path} - {status} - {response_time_ms:.2f}ms")
+        except:
+            pass  # Even basic logging failure shouldn't break anything
 
-    return response
+        return response
+
+    except Exception as e:
+        # If anything goes wrong, still return a response
+        if response:
+            return response
+        else:
+            # Create a minimal error response if no response was generated
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=500,
+                content={"detail": "Internal server error"}
+            )
 
 # Explicit OPTIONS handler for mobile browser preflight requests
 @app.options("/rag/generate-test")
