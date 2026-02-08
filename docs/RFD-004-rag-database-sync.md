@@ -2,13 +2,27 @@
 
 **Request for Discussion (RFD) 004**
 **Title**: RAG Database Update and Synchronization Procedures
-**Status**: Implemented
+**Status**: Implemented (Updated 2026-02-08)
 **Created**: 2025-12-01
 **Author**: System Architecture Team
 
 ## Summary
 
 This RFD documents the RAG database synchronization process for ingesting blog content from the Jekyll blog repository into ChromaDB for semantic search and retrieval-augmented generation. The system fetches markdown posts from GitHub, processes them into vector embeddings, and maintains automatic deduplication to prevent duplicate content ingestion.
+
+## Machine Constraints
+
+**OCI Free Tier Instance**:
+- **RAM**: 956MB total (~370MB available)
+- **Swap**: 4GB (1.4GB typically in use)
+- **CPU**: 2 vCPUs (AMD EPYC 7551)
+- **Storage**: ~33GB free
+
+**Impact on Sync Operations**:
+- A full sync (all 139 posts) downloads every post from GitHub, then loads all ChromaDB metadata into memory for deduplication. On this instance, this can take over an hour due to embedding computation and memory pressure.
+- On 2026-02-08, a full sync via the API endpoint ran for ~70 minutes, froze the server, and killed the uvicorn process. The sync itself completed (4,905 → 7,925 chunks), but the server was unresponsive afterward.
+- **Always prefer incremental updates** (`most_recent_only: true` or `num_posts: N`) over full syncs to avoid exhausting memory and blocking the API.
+- Full syncs should only be run via direct Python execution (Method 2), never through the API endpoint, and ideally during off-peak hours.
 
 ## System Architecture
 
@@ -23,7 +37,7 @@ This RFD documents the RAG database synchronization process for ingesting blog c
 - **Collection Name**: blog_content
 - **Storage Path**: `/home/ubuntu/chatbot/data/chromadb/`
 - **Embedding Model**: Default ChromaDB embedding function
-- **Current Size**: 4,905 document chunks (as of 2025-12-01)
+- **Current Size**: 7,925 document chunks across 139 posts (as of 2026-02-08)
 
 ### Text Processing
 - **Chunk Size**: 500 characters
@@ -288,36 +302,57 @@ curl -s http://localhost:8000/rag/status
 
 ## Synchronization Best Practices
 
+### Preferred Update Method
+
+**For routine updates** (new posts only):
+```bash
+# Via API (safe, rate-limited, requires auth)
+curl -X POST http://localhost:8000/rag/update \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"most_recent_only": true}'
+
+# Or fetch last N posts
+curl -X POST http://localhost:8000/rag/update \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"num_posts": 5}'
+```
+
+**For full re-sync** (use direct Python, NOT the API):
+```bash
+cd /home/ubuntu/chatbot
+source venv/bin/activate
+python -c "import asyncio; from app.rag.ingestion import ContentIngester; asyncio.run(ContentIngester().update_content())" >> /home/ubuntu/chatbot/logs/sync.log 2>&1
+```
+Running a full sync through the API blocks the web server for the entire duration (potentially over an hour) and can freeze the process.
+
 ### Regular Maintenance
 
 **Recommended Schedule**:
-- **Daily**: Check for new posts if blog updates frequently
-- **Weekly**: Full synchronization to catch any missed updates
-- **Monthly**: Database integrity check and optimization
+- **Weekly**: Incremental sync (`most_recent_only: true` or `num_posts: 5`)
+- **Monthly**: Full sync via direct Python execution during off-peak hours
+- **Monthly**: Database integrity check — verify chunk count and check for stale SHA entries
 
 **Automated Sync** (via cron):
 ```bash
-# Daily at 2 AM
-0 2 * * * cd /home/ubuntu/chatbot && source venv/bin/activate && python -c "import asyncio; from app.rag.ingestion import ContentIngester; asyncio.run(ContentIngester().update_content())" >> /home/ubuntu/chatbot/logs/sync.log 2>&1
+# Weekly incremental sync at 2 AM Sunday (fetches last 5 posts)
+0 2 * * 0 cd /home/ubuntu/chatbot && source venv/bin/activate && python -c "import asyncio; from app.rag.ingestion import ContentIngester; asyncio.run(ContentIngester().update_content(num_posts=5))" >> /home/ubuntu/chatbot/logs/sync.log 2>&1
 ```
 
 ### Performance Considerations
 
 **Memory Usage**:
-- Ingestion process: Approximately 50-100MB RAM during processing
-- ChromaDB: Persistent storage, minimal RAM footprint
-- Large posts: May require additional memory for chunking
+- ChromaDB initialization at startup loads the collection index into memory. With ~8,000 chunks, this takes ~40-50 seconds on the OCI free tier instance and adds significant memory pressure.
+- A full sync downloads all posts into memory, then loads all ChromaDB metadata for deduplication. This can push memory usage close to the limit on this instance.
+- Large posts: Some posts produce 100-500+ chunks (e.g., `yapping-on-ebeam-lithography.md` has 526 chunks), requiring proportionally more memory during embedding.
 
-**Processing Time**:
-- Fetching: ~100ms per post (GitHub API latency)
-- Processing: ~10ms per post (text chunking)
-- Storage: ~50ms per post (ChromaDB insertion)
-- **Total**: Approximately 160ms per post
+**Processing Time** (observed on OCI free tier):
+- Full sync (139 posts, Feb 2026): ~70 minutes via API endpoint. The embedding computation for new chunks is the primary bottleneck on this CPU/memory constrained instance.
+- Incremental sync (`most_recent_only: true`): A few seconds for a single post.
+- ChromaDB startup: ~40-50 seconds to initialize the collection.
 
-**Estimation for Full Sync** (127 posts):
-- Expected time: ~20-30 seconds
-- Network latency: Primary bottleneck
-- Deduplication: Significantly reduces processing time for existing posts
+**WARNING**: A full sync via the API endpoint on 2026-02-08 ran for ~70 minutes and froze the uvicorn process. The sync completed but the server became unresponsive and required a manual restart. **Always prefer incremental syncs via the API. Run full syncs only via direct Python execution (Method 2) during off-peak hours.**
 
 ## Error Handling
 
@@ -422,16 +457,28 @@ du -sh /home/ubuntu/chatbot/data/chromadb/
 - No sensitive data stored in embeddings
 - Metadata includes only public post information
 
+## Known Issues
+
+### Stale Chunk Accumulation
+The deduplication mechanism uses GitHub SHA as the key. When a post is edited on GitHub, its SHA changes. The ingester treats the edited post as new and adds fresh chunks, but **does not remove the old chunks** (which have IDs based on the old SHA). Over time this causes the chunk count to grow beyond what's expected for the number of posts.
+
+**Impact**: The database grew from 4,905 chunks (Dec 2025) to 7,925 chunks (Feb 2026) despite only 12 new posts being added. The excess growth is from re-ingested edited posts.
+
+**Mitigation**: Periodically do a full database cleanup and re-sync from scratch (see Maintenance Procedures below). A proper fix would require the ingester to delete old chunks when a post's SHA changes.
+
+### Full Sync Blocks/Crashes the API Server
+Running a full sync through the `/rag/update` API endpoint blocks the uvicorn event loop for the entire duration of the sync. On the memory-constrained OCI instance, this has caused the server to become unresponsive and eventually crash. Always use direct Python execution for full syncs.
+
 ## Future Enhancements
 
 **Potential Improvements**:
-1. Incremental updates based on last sync timestamp
-2. Webhook-based updates (GitHub webhook integration)
-3. Parallel processing for faster bulk updates
-4. Differential updates (only re-process changed posts)
-5. Multi-repository support
-6. Custom embedding models
-7. Post version history tracking
+1. Stale chunk cleanup — delete old chunks when a post's SHA changes
+2. Incremental updates based on last sync timestamp
+3. Webhook-based updates (GitHub webhook integration)
+4. Run full sync in a background worker process instead of the main API process
+5. Differential updates (only re-process changed posts)
+6. Multi-repository support
+7. Custom embedding models
 
 ## Historical Context
 
@@ -439,15 +486,21 @@ du -sh /home/ubuntu/chatbot/data/chromadb/
 - Last update before December 2025: July 7, 2025
 - Gap: Nearly 5 months of content not indexed
 - Posts missing: July 7 - November 23, 2025
-- Total posts in repository: 127
-- Posts ingested after December 1, 2025 sync: Additional posts from July-November period
 
-**Current State** (as of 2025-12-01):
-- Total documents: 4,905 chunks
-- Approximately 100+ blog posts indexed
-- Database size: ~250MB
+**December 2025 Sync**:
+- Total posts in repository: 127
+- Total documents after sync: 4,905 chunks
 - Last sync: 2025-12-01 08:00 UTC
+
+**February 2026 Sync** (2026-02-08):
+- Full sync ran via API endpoint, took ~70 minutes, froze the server
+- Sync completed successfully before the server became unresponsive
+- Total posts in repository: 139
+- Total documents after sync: 7,925 chunks
+- Chunk growth includes both new posts and stale chunks from edited posts
+- Server required manual restart (tmux session `chatbot`)
+- ChromaDB startup now takes ~40-50 seconds due to larger collection
 
 ## Conclusion
 
-The RAG database synchronization system provides reliable, automated ingestion of blog content from GitHub into ChromaDB for semantic search. The deduplication mechanism prevents duplicate content, while the chunking strategy ensures optimal retrieval performance. Regular synchronization maintains database currency, and multiple update methods provide flexibility for different operational scenarios.
+The RAG database synchronization system provides reliable ingestion of blog content from GitHub into ChromaDB for semantic search. The deduplication mechanism prevents exact-SHA duplicate ingestion, but does not clean up stale chunks from edited posts — this requires periodic manual cleanup. On the resource-constrained OCI free tier instance (956MB RAM), **incremental syncs should always be preferred** over full syncs, and full syncs should never be run through the API endpoint.
